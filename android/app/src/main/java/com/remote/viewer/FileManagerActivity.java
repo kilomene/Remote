@@ -23,18 +23,26 @@ import android.widget.TextView;
 import android.widget.Toast;
 
 import com.remote.viewer.features.files.FileTransferClient;
+import com.remote.viewer.features.notify.Notify;
+import com.remote.viewer.features.session.SessionDb;
 
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Locale;
+import java.util.Queue;
 
-/** Remote file browser: list, download (pause/resume), upload, mkdir/rename/delete. */
+/**
+ * Remote file browser: list, download (pause/resume, queue), upload (queue),
+ * mkdir/rename/move/delete. Completed transfers go to the transfer history
+ * with a notification.
+ */
 public class FileManagerActivity extends Activity {
 
     public static final String EXTRA_HOST = "host";
@@ -58,6 +66,16 @@ public class FileManagerActivity extends Activity {
     private File dlTmp;
     private int dlPercent = -1;
     private boolean dlPaused;
+
+    // transfer queues (the client runs one download + one upload at a time)
+    private final Queue<FileTransferClient.Entry> dlQueue = new ArrayDeque<FileTransferClient.Entry>();
+    private final Queue<UploadJob> ulQueue = new ArrayDeque<UploadJob>();
+    private boolean ulActive;
+
+    private static class UploadJob {
+        File tmp;
+        String remote;
+    }
 
     // deferred download while waiting for the storage permission (API 26-28)
     private FileTransferClient.Entry pendingDlEntry;
@@ -193,7 +211,7 @@ public class FileManagerActivity extends Activity {
                     REQ_STORAGE);
             return;
         }
-        startDownload(e);
+        queueOrStartDownload(e);
     }
 
     @Override
@@ -211,7 +229,7 @@ public class FileManagerActivity extends Activity {
         }
     }
 
-    private void startDownload(FileTransferClient.Entry e) {
+    private void startDownload(final FileTransferClient.Entry e) {
         final String remote = join(currentPath, e.name);
         dlTmp = new File(getCacheDir(), "dl_" + System.currentTimeMillis());
         dlPath = remote;
@@ -230,25 +248,63 @@ public class FileManagerActivity extends Activity {
                 },
                 new FileTransferClient.DoneCallback() {
                     @Override public void onDone() {
+                        long size = dlTmp != null ? dlTmp.length() : 0;
                         boolean ok = FileTransferClient.installDownload(
                                 FileManagerActivity.this, dlTmp, e.name);
                         if (dlTmp != null) dlTmp.delete();
                         dlPath = null;
                         dlPercent = -1;
                         adapter.notifyDataSetChanged();
+                        SessionDb.get(FileManagerActivity.this)
+                                .logTransfer("down", remote, size,
+                                        ok ? "done" : "failed");
+                        if (ok) Notify.transferDone(FileManagerActivity.this, e.name);
+                        else Notify.transferFailed(FileManagerActivity.this,
+                                e.name, "save failed");
                         Toast.makeText(FileManagerActivity.this,
                                 ok ? e.name : "save failed",
                                 Toast.LENGTH_SHORT).show();
+                        pumpDlQueue();
                     }
                     @Override public void onError(String reason) {
                         if (dlTmp != null) dlTmp.delete();
                         dlPath = null;
                         dlPercent = -1;
                         adapter.notifyDataSetChanged();
+                        SessionDb.get(FileManagerActivity.this)
+                                .logTransfer("down", remote, 0, "failed");
+                        Notify.transferFailed(FileManagerActivity.this, e.name, reason);
                         Toast.makeText(FileManagerActivity.this,
                                 reason, Toast.LENGTH_LONG).show();
+                        pumpDlQueue();
                     }
                 });
+    }
+
+    /** Queue a download when one is already active; otherwise start it. */
+    private void queueOrStartDownload(FileTransferClient.Entry e) {
+        if (dlPath != null) {
+            dlQueue.add(e);
+            updateQueueStatus();
+            Toast.makeText(this, getString(R.string.queued, e.name),
+                    Toast.LENGTH_SHORT).show();
+        } else {
+            startDownload(e);
+        }
+    }
+
+    private void pumpDlQueue() {
+        FileTransferClient.Entry next = dlQueue.poll();
+        if (next != null) {
+            startDownload(next);
+        } else {
+            updateQueueStatus();
+        }
+    }
+
+    private void updateQueueStatus() {
+        int q = dlQueue.size() + ulQueue.size();
+        setStatus(q > 0 ? getString(R.string.queue_status, q) : "");
     }
 
     private void togglePause() {
@@ -278,36 +334,67 @@ public class FileManagerActivity extends Activity {
                 Toast.makeText(this, "read failed", Toast.LENGTH_SHORT).show();
                 return;
             }
-            final String remote = join(currentPath, name);
-            final AlertDialog dlg = new AlertDialog.Builder(this)
-                    .setTitle(getString(R.string.uploading))
-                    .setView(progressView())
-                    .setCancelable(false)
-                    .create();
-            dlg.show();
-            final ProgressBar bar = (ProgressBar) dlg.findViewById(android.R.id.progress);
-            ft.upload(tmp, remote,
-                    new FileTransferClient.ProgressCallback() {
-                        @Override public void onProgress(long done, long total) {
-                            if (bar != null && total > 0) {
-                                bar.setProgress((int) (done * 100 / total));
-                            }
-                        }
-                    },
-                    new FileTransferClient.DoneCallback() {
-                        @Override public void onDone() {
-                            tmp.delete();
-                            dlg.dismiss();
-                            refresh();
-                        }
-                        @Override public void onError(String reason) {
-                            tmp.delete();
-                            dlg.dismiss();
-                            Toast.makeText(FileManagerActivity.this,
-                                    reason, Toast.LENGTH_LONG).show();
-                        }
-                    });
+            UploadJob job = new UploadJob();
+            job.tmp = tmp;
+            job.remote = join(currentPath, name);
+            ulQueue.add(job);
+            updateQueueStatus();
+            pumpUlQueue();
         }
+    }
+
+    private void pumpUlQueue() {
+        if (ulActive) return;
+        final UploadJob job = ulQueue.poll();
+        if (job == null) {
+            updateQueueStatus();
+            return;
+        }
+        ulActive = true;
+        updateQueueStatus();
+        final AlertDialog dlg = new AlertDialog.Builder(this)
+                .setTitle(getString(R.string.uploading))
+                .setView(progressView())
+                .setCancelable(false)
+                .create();
+        dlg.show();
+        final ProgressBar bar = (ProgressBar) dlg.findViewById(android.R.id.progress);
+        ft.upload(job.tmp, job.remote,
+                new FileTransferClient.ProgressCallback() {
+                    @Override public void onProgress(long done, long total) {
+                        if (bar != null && total > 0) {
+                            bar.setProgress((int) (done * 100 / total));
+                        }
+                    }
+                },
+                new FileTransferClient.DoneCallback() {
+                    @Override public void onDone() {
+                        long size = job.tmp.length();
+                        String name = job.remote.substring(
+                                job.remote.lastIndexOf('/') + 1);
+                        job.tmp.delete();
+                        dlg.dismiss();
+                        ulActive = false;
+                        SessionDb.get(FileManagerActivity.this)
+                                .logTransfer("up", job.remote, size, "done");
+                        Notify.transferDone(FileManagerActivity.this, name);
+                        refresh();
+                        pumpUlQueue();
+                    }
+                    @Override public void onError(String reason) {
+                        String name = job.remote.substring(
+                                job.remote.lastIndexOf('/') + 1);
+                        job.tmp.delete();
+                        dlg.dismiss();
+                        ulActive = false;
+                        SessionDb.get(FileManagerActivity.this)
+                                .logTransfer("up", job.remote, 0, "failed");
+                        Notify.transferFailed(FileManagerActivity.this, name, reason);
+                        Toast.makeText(FileManagerActivity.this,
+                                reason, Toast.LENGTH_LONG).show();
+                        pumpUlQueue();
+                    }
+                });
     }
 
     private View progressView() {
@@ -373,14 +460,37 @@ public class FileManagerActivity extends Activity {
     }
 
     private void showEntryOptions(final FileTransferClient.Entry e) {
+        final String old = join(currentPath, e.name);
         new AlertDialog.Builder(this)
                 .setTitle(e.name)
                 .setItems(new CharSequence[]{getString(R.string.rename),
+                                getString(R.string.move),
                                 getString(R.string.delete)},
                         (d, which) -> {
                             if (which == 0) showRenameDialog(e);
+                            else if (which == 1) showMoveDialog(e, old);
                             else confirmDelete(e);
                         })
+                .show();
+    }
+
+    /** Move = rename to a different path (same or another directory). */
+    private void showMoveDialog(final FileTransferClient.Entry e, final String old) {
+        final EditText f = new EditText(this);
+        f.setText(old);
+        f.setSingleLine(true);
+        f.setHint(R.string.new_path);
+        int pad = (int) (20 * getResources().getDisplayMetrics().density);
+        f.setPadding(pad, pad / 2, pad, pad / 2);
+        new AlertDialog.Builder(this)
+                .setTitle(R.string.move)
+                .setView(f)
+                .setPositiveButton(R.string.ok, (d, w) -> {
+                    String dest = f.getText().toString().trim();
+                    if (dest.isEmpty() || dest.equals(old)) return;
+                    ft.rename(old, dest, simpleRefreshCb());
+                })
+                .setNegativeButton(R.string.cancel, null)
                 .show();
     }
 
