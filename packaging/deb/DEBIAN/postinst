@@ -1,0 +1,21 @@
+#!/bin/sh
+# postinst for the remote package. Creates /etc/remote; does NOT enable the
+# service until the user has set a password.
+set -e
+
+mkdir -p /etc/remote
+chmod 700 /etc/remote
+
+if [ ! -f /etc/remote/host.conf ]; then
+    echo "-----------------------------------------------------------------"
+    echo "Remote installed. Finish setup with:"
+    echo "  sudo remote-set-password"
+    echo "  sudo systemctl enable --now remote-host"
+    echo "Then connect from the Android viewer (or remote-viewer) using"
+    echo "this machine's Tailscale IP and the password you just set."
+    echo "-----------------------------------------------------------------"
+fi
+
+#DEBHELPER#
+
+exit 0
