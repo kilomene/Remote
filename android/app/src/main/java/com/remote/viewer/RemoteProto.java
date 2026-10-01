@@ -1,5 +1,7 @@
 package com.remote.viewer;
 
+import com.remote.viewer.features.pairing.DeviceHello;
+
 import java.io.ByteArrayOutputStream;
 import java.io.EOFException;
 import java.io.IOException;
@@ -35,6 +37,21 @@ public final class RemoteProto {
     public static final int PING = 0x20;
     public static final int PONG = 0x21;
     public static final int DISCONNECT = 0xFF;
+
+    // v2 additions (see PROTOCOL.md). All v1 types above are byte-identical.
+    public static final int DEVICE_HELLO = 0x30;
+    public static final int CLIPBOARD_SET = 0x40;
+    public static final int FILE_LIST = 0x50;
+    public static final int FILE_GET = 0x51;
+    public static final int FILE_DATA = 0x52;
+    public static final int FILE_DONE = 0x53;
+    public static final int FILE_PUT = 0x54;
+    public static final int FILE_MKDIR = 0x55;
+    public static final int FILE_DELETE = 0x56;
+    public static final int FILE_RENAME = 0x57;
+    public static final int FILE_LIST_RESP = 0x58;
+    public static final int FILE_META = 0x59;
+    public static final int FILE_ERROR = 0x5A;
 
     private static final int PBKDF2_ITERATIONS = 200000;
 
@@ -83,12 +100,26 @@ public final class RemoteProto {
         return new Msg(type, readN(in, len));
     }
 
-    /** Connects and runs the client side of the auth handshake. Returns the socket. */
+    /** Connects and runs the client side of the auth handshake. Returns the socket.
+     *  No DEVICE_HELLO is sent (v1 behavior). */
     public static Socket connect(String host, int port, String password) throws Exception {
+        return connect(host, port, password, null);
+    }
+
+    /**
+     * Connects and runs the client side of the auth handshake. Returns the socket.
+     * When {@code ctx} is non-null, a v2 DEVICE_HELLO is sent immediately after
+     * TCP connect and before auth (see PROTOCOL.md); a null ctx skips it.
+     */
+    public static Socket connect(String host, int port, String password,
+                                 android.content.Context ctx) throws Exception {
         Socket s = new Socket();
         s.connect(new InetSocketAddress(host, port), 10000);
         s.setTcpNoDelay(true);
         try {
+            if (ctx != null) {
+                DeviceHello.send(ctx, s);
+            }
             InputStream in = s.getInputStream();
             OutputStream out = s.getOutputStream();
             Msg m = recvMsg(in);
