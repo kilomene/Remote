@@ -38,17 +38,26 @@ public class SecureStore {
         public final int port;
         public final String password;
         public final boolean favorite;
+        public final String tags;
+        public final int icon;
 
         public Host(String name, String host, int port, String password) {
-            this(name, host, port, password, false);
+            this(name, host, port, password, false, "", 0);
         }
 
         public Host(String name, String host, int port, String password, boolean favorite) {
+            this(name, host, port, password, favorite, "", 0);
+        }
+
+        public Host(String name, String host, int port, String password,
+                    boolean favorite, String tags, int icon) {
             this.name = name;
             this.host = host;
             this.port = port;
             this.password = password;
             this.favorite = favorite;
+            this.tags = tags == null ? "" : tags;
+            this.icon = icon;
         }
     }
 
@@ -93,7 +102,8 @@ public class SecureStore {
                 JSONObject o = arr.getJSONObject(i);
                 out.add(new Host(o.getString("name"), o.getString("host"),
                         o.getInt("port"), o.optString("password", ""),
-                        o.optBoolean("favorite", false)));
+                        o.optBoolean("favorite", false),
+                        o.optString("tags", ""), o.optInt("icon", 0)));
             }
         } catch (Exception ignored) {
             // Corrupt store: start fresh rather than crash.
@@ -111,6 +121,8 @@ public class SecureStore {
                 o.put("port", h.port);
                 o.put("password", h.password);
                 o.put("favorite", h.favorite);
+                o.put("tags", h.tags);
+                o.put("icon", h.icon);
                 arr.put(o);
             }
             byte[] pt = arr.toString().getBytes(StandardCharsets.UTF_8);
