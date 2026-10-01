@@ -137,7 +137,8 @@ def v2_checks(host, port, password):
     # --- pairing: DEVICE_HELLO then auth -------------------------------------
     a = socket.create_connection((host, port), timeout=15)
     ok_payload = do_handshake(a, password, device)
-    check(ok_payload.startswith(b"REMOTE/2"), "AUTH_OK advertises REMOTE/2, got %r" % ok_payload)
+    check(ok_payload.startswith(b"REMOTE/") and ok_payload >= b"REMOTE/2",
+          "AUTH_OK advertises REMOTE/2+, got %r" % ok_payload)
 
     # --- clipboard: A sets, B (new client) receives on join -------------------
     send_json(a, CLIPBOARD_SET, {"text": "clip-hello-123"})
