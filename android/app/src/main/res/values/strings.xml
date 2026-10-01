@@ -56,8 +56,178 @@
     <string name="hosts_cleared">Saved hosts cleared.</string>
 
     <string-array name="fps_options">
-        <item>12 fps</item>
-        <item>24 fps</item>
+        <item>15 fps</item>
+        <item>30 fps</item>
+        <item>45 fps</item>
         <item>60 fps</item>
     </string-array>
+
+    <!-- v3 session -->
+    <string name="back">Back</string>
+    <string name="mode_touch">Touch</string>
+    <string name="mode_trackpad">Trackpad</string>
+    <string name="mode_mouse">Mouse</string>
+    <string name="precision">Precision</string>
+    <string name="q_ultra">Ultra</string>
+    <string name="q_high">High</string>
+    <string name="q_balanced">Balanced</string>
+    <string name="q_low">Low</string>
+    <string name="q_minlat">Min-latency</string>
+    <string name="adaptive">Adaptive quality</string>
+    <string name="adaptive_reduced">Adaptive quality: reduced — high latency. Host-side adaptive bitrate planned.</string>
+    <string name="scale_fit">Fit to screen</string>
+    <string name="scale_original">Original size</string>
+    <string name="orient_sensor">Auto-rotate</string>
+    <string name="orient_landscape">Landscape</string>
+    <string name="orient_portrait">Portrait</string>
+    <string name="exit_fullscreen">Exit fullscreen</string>
+    <string name="privacy_on">Privacy mode on — host screen hidden</string>
+    <string name="privacy_off">Privacy mode off</string>
+    <string name="displays_unsupported">Displays not supported by this host (needs protocol v3)</string>
+    <string name="displays_loading">Loading displays…</string>
+    <string name="displays_none">No displays reported</string>
+    <string name="chat_title">Session chat</string>
+    <string name="chat_hint">Message the host…</string>
+    <string name="send">Send</string>
+    <string name="chat_preview">%1$s: %2$s</string>
+    <string name="clip_history">Clipboard history</string>
+    <string name="clip_sent">Clipboard sent to host</string>
+    <string name="clear">Clear</string>
+    <string name="shot_no_frame">No frame to capture yet</string>
+    <string name="shot_saved">Screenshot saved to gallery</string>
+    <string name="share">Share</string>
+    <string name="recording">Recording…</string>
+    <string name="paused">Paused</string>
+    <string name="rec_started">Recording started</string>
+    <string name="rec_resumed">Recording resumed</string>
+    <string name="rec_saved">Recording saved to gallery</string>
+    <string name="rec_failed">Recording failed</string>
+    <string name="session_timeout_fired">Session timed out — disconnected</string>
+    <string name="conn_title">Connection</string>
+    <string name="transport_tailscale">Tailscale (WireGuard)</string>
+    <string name="conn_connected">Connected</string>
+    <string name="conn_reconnecting">Reconnecting</string>
+    <string name="conn_panel">Transport: %1$s\nEndpoint: %2$s\nStatus: %3$s\nLatency: %4$s\nProtocol: %5$s\nTransfer: %6$s</string>
+    <string name="conn_reconnect_now">Reconnect now</string>
+    <string name="move">Move</string>
+    <string name="new_path">New path (relative to home)</string>
+    <string name="queued">Queued: %1$s</string>
+    <string name="queue_status">%1$d transfer(s) queued</string>
+    <string name="shortcuts_title">Custom shortcuts</string>
+    <string name="shortcuts_hint">Comma-separated key names, e.g. F5, F11, Escape, Print. Uses the same key names as the keyboard toolbar.</string>
+    <string name="edit_shortcuts">Edit shortcuts</string>
+    <!-- quick actions -->
+    <string name="qa_title">Quick actions</string>
+    <string name="qa_lock">Lock screen</string>
+    <string name="qa_logout">Log out</string>
+    <string name="qa_reboot">Reboot</string>
+    <string name="qa_shutdown">Shut down</string>
+    <string name="qa_suspend">Suspend</string>
+    <string name="qa_open_terminal">Open terminal</string>
+    <string name="qa_open_browser">Open browser</string>
+    <string name="qa_blank_screen">Blank screen</string>
+    <string name="qa_unblank_screen">Restore screen</string>
+    <string name="qa_confirm">Are you sure? This cannot be undone from the viewer.</string>
+    <string name="qa_sent">Command sent</string>
+    <string name="qa_failed">Command failed: %1$s</string>
+    <string name="qa_denied">%1$s failed: %2$s</string>
+    <string name="qa_rejected">Host rejected the command: %1$s</string>
+    <string name="qa_url_hint">https://example.com</string>
+    <!-- notifications -->
+    <string name="notif_connected">Session connected</string>
+    <string name="notif_disconnected">Session disconnected</string>
+    <string name="notif_transfer_done">Transfer complete</string>
+    <string name="notif_transfer_failed">Transfer failed</string>
+    <string name="notif_host_offline">Host offline</string>
+    <!-- agent -->
+    <string name="agent_title">Agent dashboard</string>
+    <string name="agent_resources">Resources</string>
+    <string name="agent_services">Services</string>
+    <string name="agent_no_data">Waiting for host data…</string>
+    <string name="agent_unsupported">Agent dashboard not supported by this host (needs protocol v3)</string>
+    <string name="agent_cpu">CPU %1$d%%</string>
+    <string name="agent_mem">RAM %1$s / %2$s</string>
+    <string name="agent_disk">Disk %1$s / %2$s</string>
+    <string name="agent_net">Net ↓ %1$s  ↑ %2$s</string>
+    <string name="agent_service_note">Service control is live: start/stop/restart are executed on the host (allowlisted).</string>
+    <string name="agent_service_confirm">%1$s %2$s?</string>
+    <string name="start">Start</string>
+    <string name="restart">Restart</string>
+    <string name="logs">Logs</string>
+    <!-- terminal -->
+    <string name="term_title">Terminal</string>
+    <string name="term_new">New tab</string>
+    <string name="term_keyboard">Keyboard</string>
+    <string name="term_closed">session closed</string>
+    <string name="term_unsupported">Remote terminal not supported by this host (needs protocol v3)</string>
+    <string name="term_connecting">Connecting…</string>
+    <!-- history -->
+    <string name="session_history">Session history</string>
+    <string name="history_empty">No sessions yet</string>
+    <string name="history_events">Security events</string>
+    <string name="history_transfers">Transfers</string>
+    <!-- security -->
+    <string name="security_center">Security center</string>
+    <string name="set_biometric">Biometric app lock</string>
+    <string name="set_biometric_sub">Require fingerprint/face to open the app (Android 9+)</string>
+    <string name="bio_enabled">Biometric lock enabled</string>
+    <string name="bio_verify">Verify it\'s you to enable the app lock</string>
+    <string name="bio_unlock">Unlock Remote</string>
+    <string name="set_timeout">Session timeout</string>
+    <string name="set_timeout_sub">Auto-disconnect idle sessions</string>
+    <string name="timeout_off">Off</string>
+    <string name="minutes">min</string>
+    <string name="sec_trusted">Trusted devices</string>
+    <string name="sec_trusted_empty">No trusted devices yet — connect to a host to pair it.</string>
+    <string name="sec_trusted_note">Paired hosts are remembered locally. Revoking removes them from this device; host-side revocation is planned.</string>
+    <string name="sec_revoke">Revoke</string>
+    <string name="sec_revoke_confirm">Stop trusting %1$s?</string>
+    <string name="sec_events_title">Security events</string>
+    <string name="sec_no_events">No security events</string>
+    <!-- permissions -->
+    <string name="perms_title">Devices &amp; permissions</string>
+    <string name="perms_unsupported">This host does not support permission management (needs protocol v3).</string>
+    <string name="perms_empty">No trusted devices reported by the host.</string>
+    <string name="perms_saved">Permissions updated</string>
+    <string name="perms_save_failed">Update rejected: %1$s</string>
+    <string name="perms_denied">Blocked by host permissions: %1$s</string>
+    <string name="perms_self_note">This device — you cannot change your own permissions (the host rejects it).</string>
+    <!-- settings sections -->
+    <string name="sec_connection">Connection</string>
+    <string name="sec_controls">Controls</string>
+    <string name="sec_display">Display</string>
+    <string name="sec_clipboard">Clipboard</string>
+    <string name="sec_security">Security</string>
+    <string name="sec_notifications">Notifications</string>
+    <string name="sec_shortcuts">Shortcuts</string>
+    <string name="set_quality">Default quality</string>
+    <string name="set_quality_sub">Stream quality preset applied to new sessions</string>
+    <string name="set_reconnect">Auto-reconnect</string>
+    <string name="set_reconnect_sub">Retry the connection with exponential backoff when it drops</string>
+    <string name="set_control_mode">Default control mode</string>
+    <string name="set_sensitivity">Pointer sensitivity</string>
+    <string name="set_precision_sub">Slow the virtual cursor for fine control (trackpad/mouse modes)</string>
+    <string name="set_scaling">Default scaling</string>
+    <string name="set_notif_session">Session connect/disconnect</string>
+    <string name="set_notif_transfer">Transfer complete/failed</string>
+    <string name="set_notif_offline">Host goes offline</string>
+    <!-- main -->
+    <string name="dlg_tags">Tags (comma-separated)</string>
+    <string name="icon_pc">Desktop</string>
+    <string name="icon_laptop">Laptop</string>
+    <string name="icon_server">Server</string>
+    <string name="edit">Edit</string>
+
+    <string name="agent_updated_at">Updated %1$s</string>
+    <string name="history_clear_confirm">Clear all recorded sessions?</string>
+    <string name="history_sessions">Sessions</string>
+    <string name="history_security">Security events</string>
+    <string name="not_connected">Not connected</string>
+    <string name="qa_browser">Open browser</string>
+    <string name="qa_terminal">Open terminal</string>
+    <string name="sec_bio_on">Biometric lock enabled</string>
+    <string name="sec_revoked">Device revoked</string>
+    <string name="sec_timeout">Session timeout</string>
+    <string name="sec_timeout_mins">%1$d min</string>
+    <string name="sec_timeout_off">Off</string>
 </resources>
