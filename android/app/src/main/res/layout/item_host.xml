@@ -8,6 +8,13 @@
     android:padding="16dp"
     android:layout_marginTop="10dp">
 
+    <ImageView
+        android:id="@+id/host_icon"
+        android:layout_width="36dp"
+        android:layout_height="36dp"
+        android:layout_marginEnd="12dp"
+        android:src="@drawable/ic_pc" />
+
     <LinearLayout
         android:layout_width="0dp"
         android:layout_height="wrap_content"
@@ -30,6 +37,14 @@
             android:layout_marginTop="2dp"
             android:textColor="@color/text_dim"
             android:textSize="13sp" />
+
+        <TextView
+            android:id="@+id/host_meta"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="2dp"
+            android:textColor="@color/text_faint"
+            android:textSize="12sp" />
     </LinearLayout>
 
     <ImageButton
