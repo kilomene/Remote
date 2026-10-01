@@ -20,10 +20,16 @@ import javax.crypto.spec.PBEKeySpec;
 import javax.crypto.spec.SecretKeySpec;
 
 /**
- * Remote wire protocol v1 (see PROTOCOL.md).
+ * Remote wire protocol v1/v2/v3 (see PROTOCOL.md).
  * Framing: [1-byte type][4-byte big-endian length][payload].
  * Auth: server sends salt(16)||nonce(32); client replies
  * HMAC-SHA256(PBKDF2-HMAC-SHA256(password, salt, 200000), nonce).
+ *
+ * v3 adds: SYSTEM_CMD/RESP (0x60/0x6F), TERMINAL_* (0x61-0x63),
+ * CHAT_MSG (0x64), AGENT_QUERY/STATUS (0x65/0x66), DISPLAYS_QUERY/LIST
+ * (0x67/0x68). 0x70-0x7F reserved for audio (planned, constants only).
+ * AUTH_OK carries b"REMOTE/N"; any REMOTE/N is accepted and the version
+ * is exposed via {@link #lastProtoVersion} for graceful degradation.
  */
 public final class RemoteProto {
     public static final int PORT = 47800;
@@ -52,6 +58,39 @@ public final class RemoteProto {
     public static final int FILE_LIST_RESP = 0x58;
     public static final int FILE_META = 0x59;
     public static final int FILE_ERROR = 0x5A;
+
+    // v3 additions (see PROTOCOL.md).
+    public static final int SYSTEM_CMD = 0x60;
+    public static final int TERMINAL_OPEN = 0x61;    // c->s {cols,rows}; s->c {session}
+    public static final int TERMINAL_DATA = 0x62;    // bidi {session, data: base64}
+    public static final int TERMINAL_CLOSE = 0x63;   // bidi {session}
+    public static final int CHAT_MSG = 0x64;         // bidi {from, text, ts}
+    public static final int AGENT_QUERY = 0x65;      // c->s (empty)
+    public static final int AGENT_STATUS = 0x66;     // s->c {cpu_pct, mem_*, disk_*, net_*, services, ts}
+    public static final int DISPLAYS_QUERY = 0x67;   // c->s (empty)
+    public static final int DISPLAYS_LIST = 0x68;    // s->c {displays:[{id,name,w,h,primary}], active}
+    public static final int SYSTEM_RESP = 0x6F;      // s->c {cmd, ok, detail}
+
+    // 0x70-0x7F: audio streaming — RESERVED, planned. Constants only.
+    public static final int AUDIO_START = 0x70;
+    public static final int AUDIO_DATA = 0x71;
+    public static final int AUDIO_STOP = 0x72;
+
+    // v3 multi-user permissions (host-enforced).
+    public static final int PERMS_SET = 0x80;        // c->s {device_id, permissions:{...}}
+    public static final int PERMS_RESP = 0x81;       // s->c {device_id, ok, detail}
+    public static final int PERMS_DENIED = 0x82;     // s->c {op, reason}
+    public static final int PERMS_LIST = 0x83;       // c->s (empty)
+    public static final int PERMS_LIST_RESP = 0x84;  // s->c {devices:[{device_id, device_name,
+                                                    //   platform, first_seen, last_seen,
+                                                    //   permissions:{...}}]}
+
+    /** The 7 permission flags the host enforces per trusted device. */
+    public static final String[] PERMISSIONS = {
+            "view", "mouse", "keyboard", "clipboard", "files", "terminal", "system"};
+
+    /** Protocol version from the last successful AUTH_OK (REMOTE/N). */
+    public static volatile int lastProtoVersion = 1;
 
     private static final int PBKDF2_ITERATIONS = 200000;
 
@@ -140,7 +179,10 @@ public final class RemoteProto {
             // best-effort: don't keep password-derived material longer than needed
             Arrays.fill(key, (byte) 0);
             m = recvMsg(in);
-            if (m.type == AUTH_OK) return s;
+            if (m.type == AUTH_OK) {
+                lastProtoVersion = parseVersion(m.payload);
+                return s;
+            }
             if (m.type == AUTH_FAIL) {
                 throw new AuthException("auth failed: " + new String(m.payload, StandardCharsets.UTF_8));
             }
@@ -153,5 +195,20 @@ public final class RemoteProto {
 
     public static void sendInput(OutputStream out, String json) throws IOException {
         sendMsg(out, INPUT, json.getBytes(StandardCharsets.UTF_8));
+    }
+
+    /**
+     * Parses b"REMOTE/N" into N. Any payload starting with "REMOTE/" is
+     * accepted (forward compatible); unparseable -> 1 (degrade to v1).
+     */
+    public static int parseVersion(byte[] payload) {
+        try {
+            String s = new String(payload, StandardCharsets.UTF_8).trim();
+            if (s.startsWith("REMOTE/")) {
+                return Integer.parseInt(s.substring(7).trim());
+            }
+        } catch (Exception ignored) {
+        }
+        return 1;
     }
 }
