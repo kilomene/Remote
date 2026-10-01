@@ -14,11 +14,13 @@ jobs:
 
       - name: Build Android APK
         env:
-          REMOTE_ANDROID_SDK: ${{ env.ANDROID_HOME }}
           REMOTE_APK_OUT: ${{ github.workspace }}/out/remote-viewer.apk
           REMOTE_KEYSTORE: ${{ runner.temp }}/remote-viewer.keystore
         run: |
-          # GitHub runners ship a JDK and the Android SDK; no Gradle needed.
+          # GitHub runners expose the Android SDK + JDK as shell env vars
+          # (ANDROID_HOME / ANDROID_SDK_ROOT / JAVA_HOME_17_X64) — NOT as the
+          # GitHub `env` context. build-apk.sh auto-detects them; just make
+          # sure the JDK is preferred via REMOTE_JAVA_HOME.
           export REMOTE_JAVA_HOME="$JAVA_HOME_17_X64"
           bash android/build-apk.sh
 
