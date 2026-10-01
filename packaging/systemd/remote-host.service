@@ -1,0 +1,18 @@
+[Unit]
+Description=Remote host - remote desktop over Tailscale
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/remote-host
+Restart=on-failure
+RestartSec=5
+# The host needs access to the desktop session for screen capture and
+# input injection. For a single-user machine, uncomment and adapt:
+# Environment=DISPLAY=:0
+# Environment=XAUTHORITY=/home/USERNAME/.Xauthority
+# Alternatively run `remote-host` as your desktop user inside the session.
+
+[Install]
+WantedBy=multi-user.target
