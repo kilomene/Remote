@@ -45,6 +45,26 @@
                 android:src="@drawable/ic_settings"
                 android:contentDescription="@string/settings"
                 android:padding="12dp" />
+
+            <ImageButton
+                android:id="@+id/btn_security"
+                android:layout_width="48dp"
+                android:layout_height="48dp"
+                android:layout_marginStart="10dp"
+                android:background="@drawable/bg_icon_btn"
+                android:src="@drawable/ic_shield"
+                android:contentDescription="@string/security_center"
+                android:padding="12dp" />
+
+            <ImageButton
+                android:id="@+id/btn_history"
+                android:layout_width="48dp"
+                android:layout_height="48dp"
+                android:layout_marginStart="10dp"
+                android:background="@drawable/bg_icon_btn"
+                android:src="@drawable/ic_history"
+                android:contentDescription="@string/session_history"
+                android:padding="12dp" />
         </LinearLayout>
 
         <TextView
