@@ -36,6 +36,19 @@ public class RemoteClient {
         void onStats(int fps, long rttMs);
         void onClipboardText(String text);
         void onFileMsg(int type, byte[] payload);
+
+        // v3 additions — default no-ops so v2-only listeners keep working.
+        default void onProtoVersion(int version) {}
+        default void onSystemResp(String cmd, boolean ok, String detail) {}
+        default void onTerminalOpened(String session) {}
+        default void onTerminalData(String session, byte[] data) {}
+        default void onTerminalClosed(String session) {}
+        default void onChat(String from, String text, long ts) {}
+        default void onAgentStatus(String json) {}
+        default void onDisplays(String json) {}
+        default void onPermsResp(String deviceId, boolean ok, String detail) {}
+        default void onPermsDenied(String op, String reason) {}
+        default void onPermsList(String json) {}
     }
 
     private final Context ctx;
@@ -50,6 +63,12 @@ public class RemoteClient {
     private volatile OutputStream out;
     private volatile long pingSentAt;
     private volatile byte[] pingToken;
+    private volatile int protoVersion = 1;
+    private final java.util.concurrent.atomic.AtomicLong rxBytes =
+            new java.util.concurrent.atomic.AtomicLong();
+    private final java.util.concurrent.atomic.AtomicLong txBytes =
+            new java.util.concurrent.atomic.AtomicLong();
+    private volatile long sessionStartMs;
 
     /** v1-style client: no DEVICE_HELLO is sent. */
     public RemoteClient(String host, int port, String password, Listener listener) {
@@ -82,8 +101,28 @@ public class RemoteClient {
         if (o == null) return;
         try {
             RemoteProto.sendMsg(o, type, payload);
+            txBytes.addAndGet(5L + (payload == null ? 0 : payload.length));
         } catch (IOException ignored) {
         }
+    }
+
+    /** Negotiated protocol version (REMOTE/N from AUTH_OK), 1 if unknown. */
+    public int getProtoVersion() {
+        return protoVersion;
+    }
+
+    public long getRxBytes() {
+        return rxBytes.get();
+    }
+
+    public long getTxBytes() {
+        return txBytes.get();
+    }
+
+    /** Uptime of the current connection in ms, 0 when disconnected. */
+    public long getSessionAgeMs() {
+        long s = sessionStartMs;
+        return s == 0 ? 0 : System.currentTimeMillis() - s;
     }
 
     public void sendInput(String json) {
@@ -159,6 +198,86 @@ public class RemoteClient {
         }
     }
 
+    // ---- v3 sends -----------------------------------------------------------
+
+    /** 0x60 SYSTEM_CMD c->s {cmd, args?}. args may be null. */
+    public void sendSystemCmd(String cmd, JSONObject args) {
+        try {
+            JSONObject o = new JSONObject();
+            o.put("cmd", cmd);
+            if (args != null) o.put("args", args);
+            send(RemoteProto.SYSTEM_CMD, o.toString().getBytes(UTF8));
+        } catch (JSONException ignored) {
+        }
+    }
+
+    public void sendTerminalOpen(int cols, int rows) {
+        try {
+            JSONObject o = new JSONObject();
+            o.put("cols", cols);
+            o.put("rows", rows);
+            send(RemoteProto.TERMINAL_OPEN, o.toString().getBytes(UTF8));
+        } catch (JSONException ignored) {
+        }
+    }
+
+    public void sendTerminalData(String session, byte[] data) {
+        try {
+            JSONObject o = new JSONObject();
+            o.put("session", session);
+            o.put("data", android.util.Base64.encodeToString(
+                    data == null ? new byte[0] : data, android.util.Base64.NO_WRAP));
+            send(RemoteProto.TERMINAL_DATA, o.toString().getBytes(UTF8));
+        } catch (JSONException ignored) {
+        }
+    }
+
+    public void sendTerminalClose(String session) {
+        try {
+            JSONObject o = new JSONObject();
+            o.put("session", session);
+            send(RemoteProto.TERMINAL_CLOSE, o.toString().getBytes(UTF8));
+        } catch (JSONException ignored) {
+        }
+    }
+
+    public void sendChat(String from, String text) {
+        try {
+            JSONObject o = new JSONObject();
+            o.put("from", from == null ? "" : from);
+            o.put("text", text == null ? "" : text);
+            o.put("ts", System.currentTimeMillis());
+            send(RemoteProto.CHAT_MSG, o.toString().getBytes(UTF8));
+        } catch (JSONException ignored) {
+        }
+    }
+
+    public void sendAgentQuery() {
+        send(RemoteProto.AGENT_QUERY, new byte[0]);
+    }
+
+    public void sendDisplaysQuery() {
+        send(RemoteProto.DISPLAYS_QUERY, "{}".getBytes(UTF8));
+    }
+
+    // ---- v3 permissions (host-enforced) -------------------------------------
+
+    /** 0x80 PERMS_SET c->s {device_id, permissions:{view,mouse,...}}. */
+    public void sendPermsSet(String deviceId, JSONObject permissions) {
+        try {
+            JSONObject o = new JSONObject();
+            o.put("device_id", deviceId);
+            o.put("permissions", permissions == null ? new JSONObject() : permissions);
+            send(RemoteProto.PERMS_SET, o.toString().getBytes(UTF8));
+        } catch (JSONException ignored) {
+        }
+    }
+
+    /** 0x83 PERMS_LIST c->s. */
+    public void sendPermsList() {
+        send(RemoteProto.PERMS_LIST, "{}".getBytes(UTF8));
+    }
+
     private static byte[] jsonPath(String path) {
         try {
             JSONObject o = new JSONObject();
@@ -210,7 +329,10 @@ public class RemoteClient {
     private void serveOnce() throws Exception {
         final Socket s = RemoteProto.connect(host, port, password, ctx);
         out = s.getOutputStream();
+        sessionStartMs = System.currentTimeMillis();
+        protoVersion = RemoteProto.lastProtoVersion;
         listener.onConnected();
+        listener.onProtoVersion(protoVersion);
         net.execute(() -> pingLoop(s));
         final long[] winStart = { System.currentTimeMillis() };
         final int[] winFrames = { 0 };
@@ -218,6 +340,7 @@ public class RemoteClient {
         try {
             while (!stop.get() && !s.isClosed()) {
                 RemoteProto.Msg m = RemoteProto.recvMsg(s.getInputStream());
+                rxBytes.addAndGet(5L + (m.payload == null ? 0 : m.payload.length));
                 if (m.type == RemoteProto.FRAME) {
                     winFrames[0]++;
                     listener.onFrame(m.payload);
@@ -230,6 +353,26 @@ public class RemoteClient {
                     dispatchClipboard(m.payload);
                 } else if (m.type >= RemoteProto.FILE_LIST && m.type <= RemoteProto.FILE_ERROR) {
                     listener.onFileMsg(m.type, m.payload);
+                } else if (m.type == RemoteProto.SYSTEM_RESP) {
+                    dispatchSystemResp(m.payload);
+                } else if (m.type == RemoteProto.TERMINAL_OPEN) {
+                    dispatchTerminalOpened(m.payload);
+                } else if (m.type == RemoteProto.TERMINAL_DATA) {
+                    dispatchTerminalData(m.payload);
+                } else if (m.type == RemoteProto.TERMINAL_CLOSE) {
+                    dispatchTerminalClosed(m.payload);
+                } else if (m.type == RemoteProto.CHAT_MSG) {
+                    dispatchChat(m.payload);
+                } else if (m.type == RemoteProto.AGENT_STATUS) {
+                    listener.onAgentStatus(new String(m.payload, UTF8));
+                } else if (m.type == RemoteProto.DISPLAYS_LIST) {
+                    listener.onDisplays(new String(m.payload, UTF8));
+                } else if (m.type == RemoteProto.PERMS_RESP) {
+                    dispatchPermsResp(m.payload);
+                } else if (m.type == RemoteProto.PERMS_DENIED) {
+                    dispatchPermsDenied(m.payload);
+                } else if (m.type == RemoteProto.PERMS_LIST_RESP) {
+                    listener.onPermsList(new String(m.payload, UTF8));
                 } else if (m.type == RemoteProto.DISCONNECT) {
                     return;
                 }
@@ -243,6 +386,7 @@ public class RemoteClient {
         } finally {
             try { s.close(); } catch (IOException ignored) {}
             closeOut();
+            sessionStartMs = 0;
         }
     }
 
@@ -250,6 +394,68 @@ public class RemoteClient {
         try {
             String text = new JSONObject(new String(payload, UTF8)).getString("text");
             listener.onClipboardText(text);
+        } catch (JSONException ignored) {
+        }
+    }
+
+    private void dispatchSystemResp(byte[] payload) {
+        try {
+            JSONObject o = new JSONObject(new String(payload, UTF8));
+            listener.onSystemResp(o.optString("cmd", ""),
+                    o.optBoolean("ok", false), o.optString("detail", ""));
+        } catch (JSONException ignored) {
+        }
+    }
+
+    private void dispatchTerminalOpened(byte[] payload) {
+        try {
+            String session = new JSONObject(new String(payload, UTF8)).getString("session");
+            listener.onTerminalOpened(session);
+        } catch (JSONException ignored) {
+        }
+    }
+
+    private void dispatchTerminalData(byte[] payload) {
+        try {
+            JSONObject o = new JSONObject(new String(payload, UTF8));
+            String session = o.getString("session");
+            byte[] data = android.util.Base64.decode(o.optString("data", ""),
+                    android.util.Base64.DEFAULT);
+            listener.onTerminalData(session, data);
+        } catch (Exception ignored) {
+        }
+    }
+
+    private void dispatchTerminalClosed(byte[] payload) {
+        try {
+            String session = new JSONObject(new String(payload, UTF8)).getString("session");
+            listener.onTerminalClosed(session);
+        } catch (JSONException ignored) {
+        }
+    }
+
+    private void dispatchChat(byte[] payload) {
+        try {
+            JSONObject o = new JSONObject(new String(payload, UTF8));
+            listener.onChat(o.optString("from", ""), o.optString("text", ""),
+                    o.optLong("ts", System.currentTimeMillis()));
+        } catch (JSONException ignored) {
+        }
+    }
+
+    private void dispatchPermsResp(byte[] payload) {
+        try {
+            JSONObject o = new JSONObject(new String(payload, UTF8));
+            listener.onPermsResp(o.optString("device_id", ""),
+                    o.optBoolean("ok", false), o.optString("detail", ""));
+        } catch (JSONException ignored) {
+        }
+    }
+
+    private void dispatchPermsDenied(byte[] payload) {
+        try {
+            JSONObject o = new JSONObject(new String(payload, UTF8));
+            listener.onPermsDenied(o.optString("op", ""), o.optString("reason", ""));
         } catch (JSONException ignored) {
         }
     }
