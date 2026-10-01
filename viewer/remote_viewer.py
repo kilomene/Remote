@@ -30,7 +30,11 @@ class ViewerClient:
 
     def __init__(self, host, port, password):
         self.sock = socket.create_connection((host, port), timeout=15)
-        proto.client_handshake(self.sock, password)
+        proto.client_handshake(self.sock, password, device={
+            "device_id": "linux-viewer-%s" % socket.gethostname(),
+            "device_name": socket.gethostname(),
+            "platform": "linux",
+        })
         self.frames = 0
         self.running = True
 
