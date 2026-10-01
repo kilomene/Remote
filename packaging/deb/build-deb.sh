@@ -25,6 +25,7 @@ chmod 755 "$STAGE/DEBIAN/postinst" "$STAGE/DEBIAN/prerm"
 
 # python sources (flat layout; remote_proto.py sits next to the scripts)
 cp "$ROOT/host/remote_host.py" "$ROOT/host/remote_set_password.py" \
+   "$ROOT/host/file_transfer.py" \
    "$ROOT/viewer/remote_viewer.py" "$ROOT/common/remote_proto.py" \
    "$STAGE/opt/remote/lib/"
 chmod 755 "$STAGE/opt/remote/lib/"*.py
