@@ -3,8 +3,10 @@
 
 Listens on TCP (default 47800), authenticates the viewer with a
 challenge-response password handshake, then streams JPEG screen frames,
-injects the viewer's mouse/keyboard input, syncs clipboards and serves
-file transfers (protocol v2).
+injects the viewer's mouse/keyboard input, syncs clipboards, serves
+file transfers (protocol v2), and handles v3 features: whitelisted
+system commands, pty-backed remote terminal, agent status, display
+listing, and session chat.
 
 X11 is the capture target (mss). Wayland capture is not yet supported.
 """
@@ -27,6 +29,11 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."
 
 import remote_proto as proto
 from file_transfer import FileTransfer, JailError, CHUNK as FILE_CHUNK
+from sys_cmd import SysCmdExecutor
+from terminal import TerminalManager, TerminalError
+from agent_status import collect_status
+from displays import get_displays
+from chat import ChatLog
 
 LOG = logging.getLogger("remote-host")
 
@@ -58,7 +65,8 @@ def load_config(path):
         salt = base64.b64decode(cfg["salt"])
         key = base64.b64decode(cfg["key"])
         file_root = cfg.get("file_root") or os.path.expanduser("~")
-        return salt, key, file_root
+        monitored = cfg.get("monitored_services") or ["remote-host", "tailscaled"]
+        return salt, key, file_root, monitored
     except (OSError, KeyError, ValueError) as exc:
         raise SystemExit("cannot load %s: %s (run remote-set-password first)" % (path, exc))
 
@@ -205,13 +213,21 @@ class TestInputSink:
 # ---------------------------------------------------------------- pairing
 
 class DeviceStore:
-    """Trusted devices (trust-on-first-use via password). JSON list at path."""
+    """Trusted devices (trust-on-first-use via password). JSON list at path.
+
+    Each entry carries a permissions dict with the seven boolean flags from
+    proto.PERMISSION_FLAGS. New devices default to all-true (preserves the
+    trust-on-first-use behavior); entries written before permissions existed
+    are migrated on load. An in-memory cache (write-through to disk) keeps
+    per-message permission lookups cheap.
+    """
 
     def __init__(self, path):
         self.path = path
         self._lock = threading.Lock()
+        self._devices = None
 
-    def _read(self):
+    def _read_file(self):
         try:
             with open(self.path) as f:
                 data = json.load(f)
@@ -219,7 +235,7 @@ class DeviceStore:
         except (OSError, ValueError):
             return []
 
-    def _write(self, devices):
+    def _write_file(self, devices):
         tmp = self.path + ".tmp"
         try:
             d = os.path.dirname(self.path)
@@ -232,27 +248,77 @@ class DeviceStore:
         except OSError as exc:
             LOG.warning("cannot persist trusted devices: %s", exc)
 
+    @staticmethod
+    def _default_perms():
+        return {f: True for f in proto.PERMISSION_FLAGS}
+
+    def _ensure_perms(self, entry):
+        """Migrate an entry to a full seven-flag boolean permissions dict."""
+        perms = entry.get("permissions")
+        if not isinstance(perms, dict):
+            perms = {}
+        for f in proto.PERMISSION_FLAGS:
+            if not isinstance(perms.get(f), bool):
+                perms[f] = True
+        entry["permissions"] = perms
+
+    def _load_locked(self):
+        if self._devices is None:
+            self._devices = self._read_file()
+            for d in self._devices:
+                self._ensure_perms(d)
+            self._write_file(self._devices)
+
     def trust(self, device):
         """Record a device as trusted (idempotent). Returns True if new."""
         now = datetime.datetime.now(datetime.timezone.utc).isoformat()
         with self._lock:
-            devices = self._read()
-            for d in devices:
+            self._load_locked()
+            for d in self._devices:
                 if d.get("device_id") == device.get("device_id"):
                     d["last_seen"] = now
                     d["device_name"] = device.get("device_name", d.get("device_name"))
                     d["platform"] = device.get("platform", d.get("platform"))
-                    self._write(devices)
+                    self._ensure_perms(d)
+                    self._write_file(self._devices)
                     return False
-            devices.append({
+            self._devices.append({
                 "device_id": device.get("device_id", "unknown"),
                 "device_name": device.get("device_name", "unknown"),
                 "platform": device.get("platform", "unknown"),
                 "first_seen": now,
                 "last_seen": now,
+                "permissions": self._default_perms(),
             })
-            self._write(devices)
+            self._write_file(self._devices)
             return True
+
+    def set_permissions(self, device_id, perms):
+        """Replace a device's permission flags. Returns False if unknown."""
+        with self._lock:
+            self._load_locked()
+            for d in self._devices:
+                if d.get("device_id") == device_id:
+                    d["permissions"] = {f: bool(perms[f])
+                                        for f in proto.PERMISSION_FLAGS}
+                    self._write_file(self._devices)
+                    return True
+            return False
+
+    def get_permissions(self, device_id):
+        """Current permission flags for a device, or None if unknown."""
+        with self._lock:
+            self._load_locked()
+            for d in self._devices:
+                if d.get("device_id") == device_id:
+                    return dict(d.get("permissions") or self._default_perms())
+            return None
+
+    def list_devices(self):
+        """All trusted devices (copies) with their permissions."""
+        with self._lock:
+            self._load_locked()
+            return [dict(d) for d in self._devices]
 
 
 class ConnectionLog:
@@ -405,8 +471,10 @@ class HostServer:
             self.conn_log = ConnectionLog(os.environ.get("REMOTE_CONN_LOG")
                                           or "/tmp/remote-selftest-connections.log")
             self.clipboard = ClipboardSync(self.broadcast, memory=True)
+            self.monitored_services = ["remote-host", "tailscaled"]
         else:
-            self.salt, self.key, self.file_root = load_config(config_path)
+            self.salt, self.key, self.file_root, self.monitored_services = \
+                load_config(config_path)
             try:
                 self.capture = ScreenCapture()
             except RuntimeError as exc:
@@ -423,6 +491,14 @@ class HostServer:
         self.files = FileTransfer(self.file_root)
         LOG.info("file root: %s", self.files.root)
 
+        # v3 services
+        self.sys_cmd = SysCmdExecutor(
+            dry_run=self_test,
+            displays_fn=lambda: get_displays(getattr(self.capture, "size", None)),
+            monitored_services=self.monitored_services)
+        self.terminals = TerminalManager()
+        self.chat = ChatLog()
+
         # Modular handler registry: one function per message type.
         # New protocol features register here without touching the loop.
         self.handlers = {
@@ -438,6 +514,15 @@ class HostServer:
             proto.FILE_MKDIR: self._h_file_mkdir,
             proto.FILE_DELETE: self._h_file_delete,
             proto.FILE_RENAME: self._h_file_rename,
+            proto.SYSTEM_CMD: self._h_system_cmd,
+            proto.TERMINAL_OPEN: self._h_terminal_open,
+            proto.TERMINAL_DATA: self._h_terminal_data,
+            proto.TERMINAL_CLOSE: self._h_terminal_close,
+            proto.CHAT_MSG: self._h_chat,
+            proto.AGENT_QUERY: self._h_agent_query,
+            proto.DISPLAYS_QUERY: self._h_displays_query,
+            proto.PERMS_SET: self._h_perms_set,
+            proto.PERMS_LIST: self._h_perms_list,
         }
 
     # -- session bookkeeping -------------------------------------------------
@@ -445,6 +530,16 @@ class HostServer:
     def broadcast(self, mtype, payload=b""):
         with self._sessions_lock:
             sessions = list(self._sessions)
+        for s in sessions:
+            try:
+                s.send(mtype, payload)
+            except OSError:
+                pass
+
+    def broadcast_others(self, exclude, mtype, payload=b""):
+        """Send to every session except `exclude` (e.g. chat fan-out)."""
+        with self._sessions_lock:
+            sessions = [s for s in self._sessions if s is not exclude]
         for s in sessions:
             try:
                 s.send(mtype, payload)
@@ -464,6 +559,11 @@ class HostServer:
                 st["fh"].close()
             except OSError:
                 pass
+        # a dropped client must not leave shells running
+        try:
+            self.terminals.close_for_owner(session)
+        except Exception:  # noqa: BLE001
+            pass
 
     # -- main loop ------------------------------------------------------------
 
@@ -501,31 +601,44 @@ class HostServer:
                 self.conn_log.log("auth_fail", device)
                 return
             self.conn_log.log("connect", device)
-            if self.devices.trust(device):
-                LOG.info("new trusted device: %s (%s)",
-                         device.get("device_id"), device.get("device_name"))
-            self.conn_log.log("auth_ok", device)
-            LOG.info("client authenticated: %s", device.get("device_id"))
-
+            # Register the session BEFORE any logging/push I/O: a broadcast
+            # (chat, clipboard) sent by another client in this window must
+            # reach the new client. _unregister in the finally covers every
+            # exit path below.
             session = _ClientSession(conn, device)
             self._register(session)
-            # push current clipboard so the viewer syncs on join
             try:
-                cur = self.clipboard.current_text()
-                if cur:
-                    session.send(proto.CLIPBOARD_SET,
-                                 json.dumps({"text": cur}).encode("utf-8"))
-            except OSError:
-                pass
-            stop = threading.Event()
-            sender = threading.Thread(target=self._frame_loop,
-                                      args=(session, stop), daemon=True)
-            sender.start()
-            try:
-                self._msg_loop(session, stop)
+                if self.devices.trust(device):
+                    LOG.info("new trusted device: %s (%s)",
+                             device.get("device_id"), device.get("device_name"))
+                self.conn_log.log("auth_ok", device)
+                LOG.info("client authenticated: %s", device.get("device_id"))
+
+                # push current clipboard so the viewer syncs on join
+                try:
+                    cur = self.clipboard.current_text()
+                    if cur:
+                        session.send(proto.CLIPBOARD_SET,
+                                     json.dumps({"text": cur}).encode("utf-8"))
+                except OSError:
+                    pass
+                stop = threading.Event()
+                sender = None
+                perms = self.devices.get_permissions(device.get("device_id")) or {}
+                if perms.get("view", True):
+                    sender = threading.Thread(target=self._frame_loop,
+                                              args=(session, stop), daemon=True)
+                    sender.start()
+                else:
+                    LOG.info("device %s has no view permission; no frames sent",
+                             device.get("device_id"))
+                try:
+                    self._msg_loop(session, stop)
+                finally:
+                    stop.set()
+                    if sender is not None:
+                        sender.join(timeout=5)
             finally:
-                stop.set()
-                sender.join(timeout=5)
                 self._unregister(session)
                 self.conn_log.log("disconnect", device)
         except Exception as exc:  # noqa: BLE001 - one bad client must not kill us
@@ -569,6 +682,17 @@ class HostServer:
                 mtype, payload = proto.recv_msg(session.conn)
             except (proto.ProtocolError, socket.timeout):
                 break
+            denied = self._perm_check(session, mtype, payload)
+            if denied is not None:
+                op, reason = denied
+                LOG.warning("denied %s from %s: %s",
+                            op, session.device.get("device_id"), reason)
+                try:
+                    session.send(proto.PERMS_DENIED,
+                                 json.dumps({"op": op, "reason": reason}).encode("utf-8"))
+                except OSError:
+                    pass
+                continue
             handler = self.handlers.get(mtype)
             if handler is None:
                 LOG.warning("unexpected msg 0x%02x", mtype)
@@ -580,6 +704,51 @@ class HostServer:
                 continue
             if done:
                 break
+
+    # -- permission enforcement (fail-closed, checked before handling) --------
+
+    def _perm_check(self, session, mtype, payload):
+        """Return (op, reason) if the message must be rejected, else None.
+
+        On rejection the caller sends PERMS_DENIED and drops the message.
+        Messages with no permission mapping (PING, DISCONNECT, CHAT_MSG,
+        AGENT_QUERY, DISPLAYS_QUERY, PERMS_*, unknown types) are always
+        allowed for authenticated clients.
+        """
+        device_id = session.device.get("device_id", "unknown")
+        perms = self.devices.get_permissions(device_id)
+        if perms is None:
+            perms = {f: True for f in proto.PERMISSION_FLAGS}
+        need = None
+        op = "0x%02x" % mtype
+        if mtype == proto.INPUT:
+            op = "INPUT"
+            try:
+                t = json.loads(payload.decode("utf-8")).get("t")
+            except ValueError:
+                return (op, "malformed input event")
+            if t in ("move", "click", "scroll"):
+                need = "mouse"
+            elif t == "key":
+                need = "keyboard"
+            else:
+                return (op, "unknown input type %r" % (t,))
+        elif mtype == proto.CLIPBOARD_SET:
+            op, need = "CLIPBOARD_SET", "clipboard"
+        elif mtype in (proto.FILE_LIST, proto.FILE_GET, proto.FILE_DATA,
+                       proto.FILE_DONE, proto.FILE_PUT, proto.FILE_MKDIR,
+                       proto.FILE_DELETE, proto.FILE_RENAME):
+            op, need = "FILE_*", "files"
+        elif mtype in (proto.TERMINAL_OPEN, proto.TERMINAL_DATA,
+                       proto.TERMINAL_CLOSE):
+            op, need = "TERMINAL_*", "terminal"
+        elif mtype == proto.SYSTEM_CMD:
+            op, need = "SYSTEM_CMD", "system"
+        else:
+            return None  # always allowed
+        if need and not perms.get(need, False):
+            return (op, "permission denied: %s" % need)
+        return None
 
     # -- message handlers (one per type) --------------------------------------
 
@@ -740,6 +909,143 @@ class HostServer:
                                      "to": req.get("to", "")}).encode("utf-8"))
         except (ValueError, JailError, OSError) as exc:
             self._file_error(session, "rename", str(exc))
+        return False
+
+    # -- v3 handlers ------------------------------------------------------------
+
+    def _h_system_cmd(self, session, payload):
+        try:
+            req = json.loads(payload.decode("utf-8"))
+        except ValueError:
+            return False
+        resp = self.sys_cmd.execute(req)
+        try:
+            session.send(proto.SYSTEM_RESP, json.dumps(resp).encode("utf-8"))
+        except OSError:
+            pass
+        LOG.info("system_cmd %s -> ok=%s", resp.get("cmd"), resp.get("ok"))
+        return False
+
+    def _h_terminal_open(self, session, payload):
+        try:
+            req = json.loads(payload.decode("utf-8"))
+            cols = int(req.get("cols") or 80)
+            rows = int(req.get("rows") or 24)
+            sid = self.terminals.open(session.send, owner=session,
+                                      cols=cols, rows=rows)
+            resp = {"session": sid}
+        except (ValueError, TerminalError) as exc:
+            resp = {"session": 0, "error": str(exc)}
+        try:
+            session.send(proto.TERMINAL_OPENED, json.dumps(resp).encode("utf-8"))
+        except OSError:
+            pass
+        return False
+
+    def _h_terminal_data(self, session, payload):
+        try:
+            req = json.loads(payload.decode("utf-8"))
+            sid = int(req["session"])
+            raw = base64.b64decode(req["data"])
+            self.terminals.write(sid, raw)
+        except (ValueError, KeyError, TypeError, TerminalError) as exc:
+            LOG.warning("bad terminal data: %s", exc)
+        return False
+
+    def _h_terminal_close(self, session, payload):
+        try:
+            req = json.loads(payload.decode("utf-8"))
+            self.terminals.close(int(req["session"]))
+        except (ValueError, KeyError, TypeError):
+            pass
+        return False
+
+    def _h_chat(self, session, payload):
+        try:
+            msg = json.loads(payload.decode("utf-8"))
+            sender = str(msg.get("from", session.device.get("device_id", "?")))[:128]
+            text = msg.get("text", "")
+            ts = msg.get("ts")
+        except ValueError:
+            return False
+        if not isinstance(text, str):
+            return False
+        LOG.info("chat from %s (%d chars)", sender, len(text))
+        self.chat.append(sender, text, ts)
+        # fan out to every OTHER session; the sender does not get an echo
+        self.broadcast_others(session, proto.CHAT_MSG, payload)
+        return False
+
+    def _h_agent_query(self, session, payload):
+        try:
+            req = json.loads(payload.decode("utf-8")) if payload else {}
+        except ValueError:
+            req = {}
+        services = req.get("services") if isinstance(req, dict) else None
+        if not isinstance(services, list):
+            services = self.monitored_services
+        status = collect_status(services)
+        try:
+            session.send(proto.AGENT_STATUS, json.dumps(status).encode("utf-8"))
+        except OSError:
+            pass
+        return False
+
+    def _h_displays_query(self, session, payload):
+        info = get_displays(getattr(self.capture, "size", None))
+        try:
+            session.send(proto.DISPLAYS_LIST, json.dumps(info).encode("utf-8"))
+        except OSError:
+            pass
+        return False
+
+    # -- multi-user / permissions handlers ---------------------------------------
+
+    @staticmethod
+    def _valid_perms(perms):
+        """All seven flags required, all booleans."""
+        return (isinstance(perms, dict)
+                and set(perms.keys()) == set(proto.PERMISSION_FLAGS)
+                and all(isinstance(v, bool) for v in perms.values()))
+
+    def _h_perms_set(self, session, payload):
+        try:
+            req = json.loads(payload.decode("utf-8"))
+        except ValueError:
+            return False
+        target = req.get("device_id") if isinstance(req, dict) else None
+        perms = req.get("permissions") if isinstance(req, dict) else None
+        resp = {"device_id": target, "ok": False}
+        own_id = session.device.get("device_id")
+        if not isinstance(target, str) or not target:
+            resp["detail"] = "device_id required"
+        elif target == own_id:
+            resp["detail"] = "cannot change own permissions"
+        elif not self._valid_perms(perms):
+            resp["detail"] = ("permissions must include all seven boolean flags: "
+                              + ", ".join(proto.PERMISSION_FLAGS))
+        elif not self.devices.set_permissions(target, perms):
+            resp["detail"] = "unknown device"
+        else:
+            resp["ok"] = True
+            LOG.info("permissions for %s set by %s: %s", target, own_id, perms)
+        try:
+            session.send(proto.PERMS_RESP, json.dumps(resp).encode("utf-8"))
+        except OSError:
+            pass
+        return False
+
+    def _h_perms_list(self, session, payload):
+        devices = self.devices.list_devices()
+        resp = {"devices": [
+            {k: d.get(k) for k in ("device_id", "device_name", "platform",
+                                   "first_seen", "last_seen", "permissions")}
+            for d in devices
+        ]}
+        try:
+            session.send(proto.PERMS_LIST_RESP, json.dumps(resp).encode("utf-8"))
+        except OSError:
+            pass
         return False
 
 
