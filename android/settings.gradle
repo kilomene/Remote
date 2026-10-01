@@ -1,0 +1,18 @@
+// UNVERIFIED — never built with Gradle in CI. The real build is android/build-apk.sh
+// (aapt2/d8/apksigner, no network). Use these only if you have a working Gradle + AGP setup.
+pluginManagement {
+    repositories {
+        google()
+        mavenCentral()
+        gradlePluginPortal()
+    }
+}
+dependencyResolutionManagement {
+    repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+    repositories {
+        google()
+        mavenCentral()
+    }
+}
+rootProject.name = "Remote"
+include(":app")
