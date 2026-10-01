@@ -1,4 +1,4 @@
-"""Shared wire protocol for Remote v1.
+"""Shared wire protocol for Remote v3.
 
 Remote is an AnyDesk-style remote desktop for Linux. Transport runs over
 Tailscale (WireGuard-encrypted P2P); this protocol adds password auth,
@@ -15,8 +15,8 @@ import socket
 import struct
 
 PORT = 47800
-PROTOCOL_VERSION = 2
-PROTOCOL_ID = b"REMOTE/2"  # v1 hosts send b"REMOTE/1"; clients accept any REMOTE/N
+PROTOCOL_VERSION = 3
+PROTOCOL_ID = b"REMOTE/3"  # v1 hosts send b"REMOTE/1"; clients accept any REMOTE/N
 
 # Message types: server -> client
 AUTH_REQ = 0x01  # payload: salt(16) || nonce(32)
@@ -49,9 +49,41 @@ FILE_LIST_RESP = 0x58  # s->c: JSON {path, entries: [{name, size, dir, mtime}]}
 FILE_META = 0x59       # s->c: JSON {path, size}
 FILE_ERROR = 0x5A      # s->c: JSON {op, reason}
 
-# Reserved ranges (see PROTOCOL.md): 0x60-0x6F audio, 0x70-0x7F screenshots/
-# recording, 0x80-0x8F chat, 0x90-0x9F terminal, 0xA0-0xAF quick actions,
-# 0xB0-0xBF multi-user/permissions, 0xC0-0xFE future.
+# --- v3 additions (v1/v2 types above are byte-identical) ---
+# system commands (0x60)
+SYSTEM_CMD = 0x60   # c->s: UTF-8 JSON {cmd, args?}
+# remote terminal (0x61-0x63); 0x61 is shared: direction distinguishes
+TERMINAL_OPEN = 0x61    # c->s: UTF-8 JSON {cols, rows}
+TERMINAL_OPENED = 0x61  # s->c: UTF-8 JSON {session}
+TERMINAL_DATA = 0x62    # either: UTF-8 JSON {session, data: base64(raw pty bytes)}
+TERMINAL_CLOSE = 0x63   # either: UTF-8 JSON {session}
+# session chat (0x64)
+CHAT_MSG = 0x64  # either: UTF-8 JSON {from, text, ts}
+# agent / automation status (0x65-0x66)
+AGENT_QUERY = 0x65   # c->s: UTF-8 JSON {} or {services:[...]} to override list
+AGENT_STATUS = 0x66  # s->c: UTF-8 JSON {cpu_pct, mem_total_mb, mem_used_mb,
+                     #   disk_total_gb, disk_used_gb, net_rx_bps, net_tx_bps,
+                     #   services:[{name, active}], ts}
+# displays (0x67-0x68)
+DISPLAYS_QUERY = 0x67  # c->s: empty or {}
+DISPLAYS_LIST = 0x68   # s->c: UTF-8 JSON {displays:[{id, name, w, h, primary}], active}
+# system command response (0x6F)
+SYSTEM_RESP = 0x6F  # s->c: UTF-8 JSON {cmd, ok, detail?}
+
+# --- multi-user / permissions (0x80-0x84, enforced by the host) ---
+PERMS_SET = 0x80        # c->s: JSON {device_id, permissions:{view,mouse,keyboard,clipboard,files,terminal,system}}
+PERMS_RESP = 0x81       # s->c: JSON {device_id, ok, detail?}
+PERMS_DENIED = 0x82     # s->c: JSON {op, reason}
+PERMS_LIST = 0x83       # c->s: JSON {}
+PERMS_LIST_RESP = 0x84  # s->c: JSON {devices:[{device_id, device_name, platform, first_seen, last_seen, permissions}]}
+
+# The seven permission flags. Every device carries all seven (booleans).
+PERMISSION_FLAGS = ("view", "mouse", "keyboard", "clipboard", "files",
+                    "terminal", "system")
+
+# Reserved ranges (see PROTOCOL.md): 0x69-0x6E spare in the v3 block,
+# 0x70-0x7F audio (planned), 0x85-0x8F reserved (multi-user extensions),
+# 0x90-0x9F WebRTC/STUN/TURN, 0xC0-0xFE future.
 
 HEADER = struct.Struct(">BI")
 MAX_PAYLOAD = 8 * 1024 * 1024  # 8 MiB sanity cap
