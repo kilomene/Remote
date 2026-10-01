@@ -61,4 +61,40 @@
         <item name="android:fontFamily">sans-serif</item>
         <item name="android:lineSpacingExtra">4dp</item>
     </style>
+
+    <style name="RemoteSection">
+        <item name="android:textColor">@color/text</item>
+        <item name="android:textSize">14sp</item>
+        <item name="android:textStyle">bold</item>
+        <item name="android:fontFamily">sans-serif-medium</item>
+        <item name="android:textAllCaps">true</item>
+        <item name="android:letterSpacing">0.06</item>
+    </style>
+
+    <!-- small key button used by the session keyboard toolbar -->
+    <style name="RemoteKeyButton" parent="android:Widget.Button">
+        <item name="android:background">@drawable/bg_icon_btn</item>
+        <item name="android:textColor">@color/text</item>
+        <item name="android:textSize">13sp</item>
+        <item name="android:textStyle">bold</item>
+        <item name="android:textAllCaps">false</item>
+        <item name="android:fontFamily">sans-serif-medium</item>
+        <item name="android:minWidth">52dp</item>
+        <item name="android:minHeight">44dp</item>
+        <item name="android:paddingLeft">10dp</item>
+        <item name="android:paddingRight">10dp</item>
+    </style>
+    <!-- tab button used by the terminal tab bar -->
+    <style name="RemoteTabButton" parent="android:Widget.Button">
+        <item name="android:background">@drawable/bg_icon_btn</item>
+        <item name="android:textColor">@color/text</item>
+        <item name="android:textSize">12sp</item>
+        <item name="android:textStyle">bold</item>
+        <item name="android:textAllCaps">false</item>
+        <item name="android:fontFamily">sans-serif-medium</item>
+        <item name="android:minWidth">64dp</item>
+        <item name="android:minHeight">40dp</item>
+        <item name="android:paddingLeft">8dp</item>
+        <item name="android:paddingRight">8dp</item>
+    </style>
 </resources>
