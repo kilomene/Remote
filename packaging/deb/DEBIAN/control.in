@@ -1,0 +1,16 @@
+Package: remote
+Version: @VERSION@
+Section: net
+Priority: optional
+Architecture: all
+Depends: python3, python3-pil, python3-tk
+Maintainer: Remote <noreply@example.com>
+Description: AnyDesk-style remote desktop for Linux over Tailscale
+ Remote lets you control a Linux machine from your phone or another
+ computer over a Tailscale network. The host streams its screen as
+ compressed frames and injects the viewer's mouse/keyboard input.
+ Transport encryption comes from Tailscale (WireGuard); access is gated
+ by a password challenge-response handshake.
+ .
+ v1: X11 screen capture, JPEG frames, password auth, systemd service
+ for unattended access.
