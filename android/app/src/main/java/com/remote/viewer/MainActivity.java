@@ -9,23 +9,40 @@ import android.os.Looper;
 import android.text.InputType;
 import android.view.LayoutInflater;
 import android.view.View;
+import android.widget.ArrayAdapter;
 import android.widget.EditText;
 import android.widget.ImageButton;
+import android.widget.ImageView;
 import android.widget.LinearLayout;
+import android.widget.Spinner;
 import android.widget.TextView;
+
+import com.remote.viewer.features.notify.Notify;
+
+import org.json.JSONObject;
 
 import java.net.InetSocketAddress;
 import java.net.Socket;
+import java.text.SimpleDateFormat;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
+import java.util.Date;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Locale;
+import java.util.Map;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 /**
  * Home screen: "MY COMPUTERS" device list.
- * Rows show name, host:port and an online/offline dot (2s TCP probe).
- * Tap connects, long-press offers pin/unpin + delete, + adds a new host.
+ * Rows show name, host:port, icon, tags, online/offline dot (2s TCP probe),
+ * and harvested metadata (resolution · last seen). Tap connects, long-press
+ * offers pin/unpin + edit + delete, + adds a new host.
+ *
+ * Hosts that go offline after the initial probe round raise a notification
+ * (while the app is open). Biometric lock (if enabled) gates app entry.
  */
 public class MainActivity extends Activity {
 
@@ -34,6 +51,9 @@ public class MainActivity extends Activity {
     private SecureStore store;
     private final Handler ui = new Handler(Looper.getMainLooper());
     private ExecutorService probes = Executors.newCachedThreadPool();
+    private final Map<String, Boolean> lastOnline = new HashMap<String, Boolean>();
+    private boolean firstRound = true;
+    private boolean paused;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -45,23 +65,66 @@ public class MainActivity extends Activity {
         emptySaved = findViewById(R.id.empty_saved);
 
         ImageButton btnAdd = findViewById(R.id.btn_add);
-        btnAdd.setOnClickListener(v -> showAddDialog());
+        btnAdd.setOnClickListener(v -> showHostDialog(null));
 
         ImageButton btnSettings = findViewById(R.id.btn_settings);
         btnSettings.setOnClickListener(v ->
                 startActivity(new Intent(this, SettingsActivity.class)));
+
+        ImageButton btnSecurity = findViewById(R.id.btn_security);
+        btnSecurity.setOnClickListener(v ->
+                startActivity(new Intent(this, SecurityCenterActivity.class)));
+
+        ImageButton btnHistory = findViewById(R.id.btn_history);
+        btnHistory.setOnClickListener(v ->
+                startActivity(new Intent(this, SessionHistoryActivity.class)));
     }
 
     @Override
     protected void onResume() {
         super.onResume();
-        refreshHosts();
+        paused = false;
+        // biometric lock actually gates app entry
+        SecurityCenterActivity.gate(this, new Runnable() {
+            @Override public void run() {
+                refreshHosts();
+            }
+        });
+    }
+
+    @Override
+    protected void onPause() {
+        paused = true;
+        super.onPause();
     }
 
     @Override
     protected void onDestroy() {
         probes.shutdownNow();
         super.onDestroy();
+    }
+
+    private static int hostIconRes(int icon) {
+        return icon == 1 ? R.drawable.ic_laptop
+                : icon == 2 ? R.drawable.ic_server : R.drawable.ic_pc;
+    }
+
+    private String hostMetaLine(String host, int port) {
+        try {
+            JSONObject all = new JSONObject(
+                    Prefs.getString(this, Prefs.K_HOST_META, "{}"));
+            JSONObject m = all.optJSONObject(host + ":" + port);
+            if (m == null) return null;
+            String res = m.optString("resolution", "");
+            long seen = m.optLong("last_seen", 0);
+            String when = seen > 0
+                    ? new SimpleDateFormat("MMM d HH:mm", Locale.US)
+                            .format(new Date(seen))
+                    : "—";
+            return (res.isEmpty() ? "" : res + " · ") + "last seen " + when;
+        } catch (Exception e) {
+            return null;
+        }
     }
 
     private void refreshHosts() {
@@ -79,9 +142,17 @@ public class MainActivity extends Activity {
             View row = inf.inflate(R.layout.item_host, savedList, false);
             TextView name = row.findViewById(R.id.host_name);
             TextView addr = row.findViewById(R.id.host_addr);
+            TextView meta = row.findViewById(R.id.host_meta);
+            ImageView icon = row.findViewById(R.id.host_icon);
             final View dot = row.findViewById(R.id.host_dot);
-            name.setText((h.favorite ? "\u2605 " : "") + h.name);
+            String label = (h.favorite ? "\u2605 " : "") + h.name;
+            if (!h.tags.isEmpty()) label += "  [" + h.tags + "]";
+            name.setText(label);
             addr.setText(h.host + ":" + h.port);
+            String metaLine = hostMetaLine(h.host, h.port);
+            meta.setVisibility(metaLine == null ? View.GONE : View.VISIBLE);
+            if (metaLine != null) meta.setText(metaLine);
+            icon.setImageResource(hostIconRes(h.icon));
             dot.getBackground().mutate().setTint(
                     getResources().getColor(R.color.text_faint, null));
             row.findViewById(R.id.btn_host_delete).setOnClickListener(v ->
@@ -94,9 +165,11 @@ public class MainActivity extends Activity {
             savedList.addView(row);
             probeOnline(h, dot);
         }
+        firstRound = true;
     }
 
     private void probeOnline(final SecureStore.Host h, final View dot) {
+        final String key = h.host + ":" + h.port;
         probes.execute(new Runnable() {
             @Override public void run() {
                 boolean online = false;
@@ -110,11 +183,27 @@ public class MainActivity extends Activity {
                 final boolean ok = online;
                 ui.post(new Runnable() {
                     @Override public void run() {
+                        if (paused) return;
                         dot.getBackground().mutate().setTint(getResources().getColor(
                                 ok ? R.color.success : R.color.text_faint, null));
                         dot.setContentDescription(ok ? "online" : "offline");
+                        Boolean prev = lastOnline.put(key, ok);
+                        // notify only on online->offline transitions, and only
+                        // after the initial probe round has established state
+                        if (!firstRound && prev != null && prev && !ok) {
+                            Notify.hostOffline(MainActivity.this, h.name);
+                        }
+                        if (prev != null && !prev && ok) {
+                            Notify.dismissHostOffline(MainActivity.this, h.name);
+                        }
                     }
                 });
+            }
+        });
+        // end the initial round after this batch of probes was posted
+        ui.post(new Runnable() {
+            @Override public void run() {
+                firstRound = false;
             }
         });
     }
@@ -124,6 +213,7 @@ public class MainActivity extends Activity {
         i.putExtra(SessionActivity.EXTRA_HOST, h.host);
         i.putExtra(SessionActivity.EXTRA_PORT, h.port);
         i.putExtra(SessionActivity.EXTRA_PASSWORD, h.password);
+        i.putExtra("device_label", h.name);
         startActivity(i);
     }
 
@@ -131,12 +221,15 @@ public class MainActivity extends Activity {
         final String pinLabel = h.favorite ? getString(R.string.unpin) : getString(R.string.pin);
         new AlertDialog.Builder(this)
                 .setTitle(h.name)
-                .setItems(new CharSequence[]{pinLabel, getString(R.string.delete)},
+                .setItems(new CharSequence[]{pinLabel, getString(R.string.edit),
+                                getString(R.string.delete)},
                         (d, which) -> {
                             if (which == 0) {
-                                store.upsert(new SecureStore.Host(h.name, h.host, h.port,
-                                        h.password, !h.favorite));
+                                store.upsert(new SecureStore.Host(h.name, h.host,
+                                        h.port, h.password, !h.favorite, h.tags, h.icon));
                                 refreshHosts();
+                            } else if (which == 1) {
+                                showHostDialog(h);
                             } else {
                                 confirmDelete(h);
                             }
@@ -155,7 +248,7 @@ public class MainActivity extends Activity {
                 .show();
     }
 
-    private void showAddDialog() {
+    private void showHostDialog(final SecureStore.Host existing) {
         LinearLayout form = new LinearLayout(this);
         form.setOrientation(LinearLayout.VERTICAL);
         int pad = (int) (16 * getResources().getDisplayMetrics().density);
@@ -168,9 +261,29 @@ public class MainActivity extends Activity {
         final EditText portF = dialogField(form, "47800", InputType.TYPE_CLASS_NUMBER);
         final EditText passF = dialogField(form, getString(R.string.hint_password),
                 InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
+        final EditText tagsF = dialogField(form, getString(R.string.dlg_tags),
+                InputType.TYPE_CLASS_TEXT);
+        final Spinner iconF = new Spinner(this);
+        ArrayAdapter<String> iconAdapter = new ArrayAdapter<String>(this,
+                android.R.layout.simple_spinner_item,
+                new String[]{getString(R.string.icon_pc),
+                        getString(R.string.icon_laptop),
+                        getString(R.string.icon_server)});
+        iconAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+        iconF.setAdapter(iconAdapter);
+        form.addView(iconF);
+
+        if (existing != null) {
+            nameF.setText(existing.name);
+            hostF.setText(existing.host);
+            portF.setText(String.valueOf(existing.port));
+            passF.setText(existing.password);
+            tagsF.setText(existing.tags);
+            iconF.setSelection(Math.max(0, Math.min(2, existing.icon)));
+        }
 
         new AlertDialog.Builder(this)
-                .setTitle(R.string.dlg_add_host)
+                .setTitle(existing == null ? R.string.dlg_add_host : R.string.edit)
                 .setView(form)
                 .setPositiveButton(R.string.save, (d, w) -> {
                     String host = hostF.getText().toString().trim();
@@ -187,7 +300,11 @@ public class MainActivity extends Activity {
                     }
                     String name = nameF.getText().toString().trim();
                     if (name.isEmpty()) name = host;
-                    store.upsert(new SecureStore.Host(name, host, port, password));
+                    String tags = tagsF.getText().toString().trim();
+                    int icon = iconF.getSelectedItemPosition();
+                    boolean fav = existing != null && existing.favorite;
+                    store.upsert(new SecureStore.Host(name, host, port, password,
+                            fav, tags, icon));
                     refreshHosts();
                 })
                 .setNegativeButton(R.string.cancel, null)
