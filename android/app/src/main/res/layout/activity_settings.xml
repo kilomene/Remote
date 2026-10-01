@@ -18,13 +18,144 @@
             android:textSize="24sp"
             android:text="@string/settings" />
 
+        <!-- Connection -->
+        <TextView
+            style="@style/RemoteSection"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="24dp"
+            android:text="@string/sec_connection" />
+
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:orientation="vertical"
             android:background="@drawable/bg_card"
             android:padding="20dp"
-            android:layout_marginTop="24dp">
+            android:layout_marginTop="8dp">
+
+            <TextView
+                style="@style/RemoteLabel"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="@string/set_quality" />
+
+            <Spinner
+                android:id="@+id/set_quality"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:background="@drawable/bg_input"
+                android:padding="12dp" />
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="@string/set_quality_sub"
+                android:textColor="@color/text_faint"
+                android:textSize="13sp"
+                android:layout_marginTop="4dp"
+                android:layout_marginBottom="16dp" />
+
+            <TextView
+                style="@style/RemoteLabel"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="@string/set_fps" />
+
+            <Spinner
+                android:id="@+id/set_fps"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:background="@drawable/bg_input"
+                android:padding="12dp" />
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="@string/set_fps_sub"
+                android:textColor="@color/text_faint"
+                android:textSize="13sp"
+                android:layout_marginTop="4dp"
+                android:layout_marginBottom="16dp" />
+
+            <CheckBox
+                android:id="@+id/set_reconnect"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="@string/set_reconnect" />
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="@string/set_reconnect_sub"
+                android:textColor="@color/text_faint"
+                android:textSize="13sp" />
+        </LinearLayout>
+
+        <!-- Controls -->
+        <TextView
+            style="@style/RemoteSection"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="24dp"
+            android:text="@string/sec_controls" />
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:background="@drawable/bg_card"
+            android:padding="20dp"
+            android:layout_marginTop="8dp">
+
+            <TextView
+                style="@style/RemoteLabel"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="@string/set_control_mode" />
+
+            <Spinner
+                android:id="@+id/set_control_mode"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:background="@drawable/bg_input"
+                android:padding="12dp"
+                android:layout_marginBottom="16dp" />
+
+            <TextView
+                style="@style/RemoteLabel"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="@string/set_sensitivity" />
+
+            <SeekBar
+                android:id="@+id/set_sensitivity"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:max="150"
+                android:layout_marginBottom="4dp" />
+
+            <TextView
+                android:id="@+id/sensitivity_val"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:textColor="@color/text_faint"
+                android:textSize="13sp"
+                android:layout_marginBottom="16dp" />
+
+            <CheckBox
+                android:id="@+id/set_precision"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="@string/precision" />
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="@string/set_precision_sub"
+                android:textColor="@color/text_faint"
+                android:textSize="13sp"
+                android:layout_marginBottom="16dp" />
 
             <CheckBox
                 android:id="@+id/set_haptics"
@@ -37,7 +168,37 @@
                 android:layout_height="wrap_content"
                 android:text="@string/set_haptics_sub"
                 android:textColor="@color/text_faint"
-                android:textSize="13sp"
+                android:textSize="13sp" />
+        </LinearLayout>
+
+        <!-- Display -->
+        <TextView
+            style="@style/RemoteSection"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="24dp"
+            android:text="@string/sec_display" />
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:background="@drawable/bg_card"
+            android:padding="20dp"
+            android:layout_marginTop="8dp">
+
+            <TextView
+                style="@style/RemoteLabel"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="@string/set_scaling" />
+
+            <Spinner
+                android:id="@+id/set_scaling"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:background="@drawable/bg_input"
+                android:padding="12dp"
                 android:layout_marginBottom="16dp" />
 
             <CheckBox
@@ -65,8 +226,24 @@
                 android:layout_height="wrap_content"
                 android:text="@string/set_smooth_sub"
                 android:textColor="@color/text_faint"
-                android:textSize="13sp"
-                android:layout_marginBottom="16dp" />
+                android:textSize="13sp" />
+        </LinearLayout>
+
+        <!-- Clipboard -->
+        <TextView
+            style="@style/RemoteSection"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="24dp"
+            android:text="@string/sec_clipboard" />
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:background="@drawable/bg_card"
+            android:padding="20dp"
+            android:layout_marginTop="8dp">
 
             <CheckBox
                 android:id="@+id/set_clipboard"
@@ -79,6 +256,36 @@
                 android:layout_height="wrap_content"
                 android:text="@string/set_clipboard_sub"
                 android:textColor="@color/text_faint"
+                android:textSize="13sp" />
+        </LinearLayout>
+
+        <!-- Security -->
+        <TextView
+            style="@style/RemoteSection"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="24dp"
+            android:text="@string/sec_security" />
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:background="@drawable/bg_card"
+            android:padding="20dp"
+            android:layout_marginTop="8dp">
+
+            <CheckBox
+                android:id="@+id/set_biometric"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="@string/set_biometric" />
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="@string/set_biometric_sub"
+                android:textColor="@color/text_faint"
                 android:textSize="13sp"
                 android:layout_marginBottom="16dp" />
 
@@ -86,11 +293,10 @@
                 style="@style/RemoteLabel"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:layout_marginTop="0dp"
-                android:text="@string/set_fps" />
+                android:text="@string/set_timeout" />
 
             <Spinner
-                android:id="@+id/set_fps"
+                android:id="@+id/set_timeout"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:background="@drawable/bg_input"
@@ -99,12 +305,88 @@
             <TextView
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:text="@string/set_fps_sub"
+                android:text="@string/set_timeout_sub"
                 android:textColor="@color/text_faint"
                 android:textSize="13sp"
-                android:layout_marginTop="4dp" />
+                android:layout_marginTop="4dp"
+                android:layout_marginBottom="16dp" />
+
+            <Button
+                android:id="@+id/btn_security_center"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:background="@drawable/bg_button"
+                android:text="@string/security_center" />
         </LinearLayout>
 
+        <!-- Notifications -->
+        <TextView
+            style="@style/RemoteSection"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="24dp"
+            android:text="@string/sec_notifications" />
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:background="@drawable/bg_card"
+            android:padding="20dp"
+            android:layout_marginTop="8dp">
+
+            <CheckBox
+                android:id="@+id/set_notif_session"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="@string/set_notif_session" />
+
+            <CheckBox
+                android:id="@+id/set_notif_transfer"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="@string/set_notif_transfer" />
+
+            <CheckBox
+                android:id="@+id/set_notif_offline"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="@string/set_notif_offline" />
+        </LinearLayout>
+
+        <!-- Shortcuts -->
+        <TextView
+            style="@style/RemoteSection"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="24dp"
+            android:text="@string/sec_shortcuts" />
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:background="@drawable/bg_card"
+            android:padding="20dp"
+            android:layout_marginTop="8dp">
+
+            <TextView
+                android:id="@+id/shortcuts_preview"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:textColor="@color/text_dim"
+                android:textSize="13sp"
+                android:layout_marginBottom="12dp" />
+
+            <Button
+                android:id="@+id/btn_edit_shortcuts"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:background="@drawable/bg_button"
+                android:text="@string/edit_shortcuts" />
+        </LinearLayout>
+
+        <!-- Danger -->
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
