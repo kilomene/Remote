@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Remote</string>
+    <string name="connect_hint">Connect to your Linux machine over Tailscale.</string>
+    <string name="hint_host">Tailscale IP or hostname (e.g. 100.x.x.20)</string>
+    <string name="hint_port">Port (default 47800)</string>
+    <string name="hint_password">Host password</string>
+    <string name="connect">Connect</string>
+    <string name="keyboard">Keyboard</string>
+    <string name="disconnect">Disconnect</string>
+</resources>
