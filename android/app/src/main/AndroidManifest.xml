@@ -25,7 +25,7 @@
         <activity
             android:name=".SessionActivity"
             android:exported="false"
-            android:screenOrientation="sensorLandscape"
+            android:screenOrientation="sensor"
             android:configChanges="orientation|screenSize|keyboardHidden"
             android:windowSoftInputMode="adjustResize" />
 
@@ -36,6 +36,33 @@
 
         <activity
             android:name=".FileManagerActivity"
+            android:exported="false"
+            android:screenOrientation="portrait" />
+
+        <activity
+            android:name=".TerminalActivity"
+            android:exported="false"
+            android:screenOrientation="sensor"
+            android:configChanges="orientation|screenSize|keyboardHidden"
+            android:windowSoftInputMode="adjustResize" />
+
+        <activity
+            android:name=".AgentActivity"
+            android:exported="false"
+            android:screenOrientation="portrait" />
+
+        <activity
+            android:name=".SessionHistoryActivity"
+            android:exported="false"
+            android:screenOrientation="portrait" />
+
+        <activity
+            android:name=".SecurityCenterActivity"
+            android:exported="false"
+            android:screenOrientation="portrait" />
+
+        <activity
+            android:name=".UserManagementActivity"
             android:exported="false"
             android:screenOrientation="portrait" />
     </application>
