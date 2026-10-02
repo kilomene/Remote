@@ -454,8 +454,8 @@ public class SessionActivity extends Activity
     private void updateMouseBar() {
         int vis = streamView.getControlMode() == StreamView.MODE_MOUSE
                 ? View.VISIBLE : View.GONE;
-        mouseLeftBtn.setVisibility(vis);
-        mouseRightBtn.setVisibility(vis);
+        if (mouseLeftBtn != null) mouseLeftBtn.setVisibility(vis);
+        if (mouseRightBtn != null) mouseRightBtn.setVisibility(vis);
     }
 
     private void showQualityPopup(View anchor) {
