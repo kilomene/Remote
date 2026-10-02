@@ -32,7 +32,9 @@ public class RemoteClient {
         void onConnected();
         void onAuthFailed(String reason);
         void onDisconnected(boolean willRetry, String reason);
-        void onFrame(byte[] jpeg);
+        // v4 pairing: the host's policy demands a pairing code before
+        // password auth. Default no-op so older listeners keep working.
+        default void onPairingRequired() {}        void onFrame(byte[] jpeg);
         void onStats(int fps, long rttMs);
         void onClipboardText(String text);
         void onFileMsg(int type, byte[] payload);
@@ -60,6 +62,8 @@ public class RemoteClient {
     private final int port;
     private final String password;
     private final Listener listener;
+    /** Optional pairing code, sent in the pre-auth pairing window. */
+    private volatile String pairCode;
     private final ExecutorService net = Executors.newCachedThreadPool();
     private final AtomicBoolean stop = new AtomicBoolean(false);
     private final SecureRandom random = new SecureRandom();
@@ -90,6 +94,11 @@ public class RemoteClient {
 
     public void start() {
         net.execute(this::runLoop);
+    }
+
+    /** Sets the pairing code used on the next (re)connect. Null/empty = none. */
+    public void setPairCode(String code) {
+        pairCode = code;
     }
 
     public void stop() {
@@ -347,6 +356,10 @@ public class RemoteClient {
                 attempt = 0; // a full session resets backoff
                 if (stop.get()) break;
                 listener.onDisconnected(true, "connection closed by host");
+            } catch (RemoteProto.PairingRequiredException e) {
+                listener.onPairingRequired();
+                listener.onDisconnected(false, e.getMessage());
+                return;
             } catch (RemoteProto.AuthException e) {
                 listener.onAuthFailed(e.getMessage());
                 listener.onDisconnected(false, e.getMessage());
@@ -368,7 +381,7 @@ public class RemoteClient {
     }
 
     private void serveOnce() throws Exception {
-        final Socket s = RemoteProto.connect(host, port, password, ctx);
+        final Socket s = RemoteProto.connect(host, port, password, pairCode, ctx);
         out = s.getOutputStream();
         sessionStartMs = System.currentTimeMillis();
         protoVersion = RemoteProto.lastProtoVersion;
