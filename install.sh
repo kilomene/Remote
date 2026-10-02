@@ -299,15 +299,19 @@ setup_password() {
     run remote-set-password || die "remote-set-password failed"
 }
 
-# ---- step 5: systemd service -----------------------------------------------------
+# ---- step 5: service (systemd, or direct background start) ------------------------
 setup_service() {
     if [ "$NO_SYSTEMD" = 1 ]; then
         warn "--no-systemd: skipping service enable/start."
         echo "Start the host manually with:  remote-host   (as your desktop user, inside the graphical session)"
         return 0
     fi
-    [ -d /run/systemd/system ] \
-        || die "systemd is not running as PID 1 (container?). Fix: run on a systemd host, or re-run with --no-systemd and start 'remote-host' manually."
+    if [ ! -d /run/systemd/system ]; then
+        warn "systemd is not running as PID 1 (container?) — starting remote-host directly in the background."
+        warn "It will NOT auto-start on boot; add it to the container's startup."
+        start_host_nosystemd
+        return 0
+    fi
     log "enabling + starting remote-host"
     run systemctl enable --now remote-host \
         || die "systemctl enable --now failed. Fix: systemctl status remote-host; journalctl -u remote-host -n 50"
@@ -321,6 +325,28 @@ setup_service() {
     fi
 }
 
+start_host_nosystemd() {
+    # remote-host listens on TCP 47800 (>1024): runs as the yourremote user.
+    # sd_notify is a no-op without NOTIFY_SOCKET, so a plain background
+    # start is safe.
+    if pgrep -f "[r]emote-host" >/dev/null 2>&1; then
+        log "remote-host already running — leaving it alone"
+        return 0
+    fi
+    have runuser || die "need 'runuser' to start remote-host without systemd"
+    [ "$DRY_RUN" = 1 ] && { echo "[dry-run] + start remote-host directly (no systemd)" >&2; return 0; }
+    log "starting remote-host in the background as user yourremote"
+    # shellcheck disable=SC2086
+    nohup runuser -u yourremote -- /usr/bin/remote-host \
+        >>/var/log/remote/host-stdout.log 2>&1 &
+    sleep 3
+    if pgrep -f "[r]emote-host" >/dev/null 2>&1; then
+        log "remote-host running (pid $(pgrep -f '[r]emote-host' | head -n1))"
+    else
+        die "remote-host did not stay up. Fix: see /var/log/remote/host-stdout.log and /var/log/remote/"
+    fi
+}
+
 # ---- step 6: summary ---------------------------------------------------------------
 print_summary() {
     local ver ip svc
@@ -328,6 +354,7 @@ print_summary() {
     ver="${ver:-unknown}"
     ip="$(tailscale ip -4 2>/dev/null | head -n1 || true)"
     if [ "$NO_SYSTEMD" = 1 ]; then svc="(skipped: --no-systemd)";
+    elif [ ! -d /run/systemd/system ] && pgrep -f "[r]emote-host" >/dev/null 2>&1; then svc="active (direct, no systemd)";
     elif systemctl is-active --quiet remote-host 2>/dev/null; then svc="active";
     else svc="NOT ACTIVE"; fi
     echo
