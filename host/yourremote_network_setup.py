@@ -25,11 +25,13 @@ import argparse
 import os
 import platform
 import re
+import select
 import shutil
 import subprocess
 import sys
 import tarfile
 import tempfile
+import time
 
 AUTH_URL_RE = re.compile(r"https://login\.tailscale\.com/[^\s'\"]+")
 
@@ -328,7 +330,7 @@ def install_tailscale_static():
 # --------------------------------------------------------------------------
 # Step 3: tailscale up (prints the auth URL)
 # --------------------------------------------------------------------------
-def tailscale_up(headscale_url=None, authkey=None):
+def tailscale_up(headscale_url=None, authkey=None, timeout=300):
     """Run `tailscale up`; print the auth URL; return it (or None).
 
     Returns the URL string when one was emitted, else None (already logged
@@ -336,6 +338,11 @@ def tailscale_up(headscale_url=None, authkey=None):
 
     authkey enables fully headless operation (tailscale up --authkey=...);
     it is NEVER printed or logged.
+
+    Output is STREAMED live, not captured-until-exit: `tailscale up`
+    prints the login URL and then BLOCKS waiting for the browser auth, so
+    buffering everything would hide the URL until the timeout kills it.
+    The URL is bannered the moment it appears.
     """
     argv = ["tailscale", "up"]
     if headscale_url:
@@ -343,22 +350,73 @@ def tailscale_up(headscale_url=None, authkey=None):
     if authkey:
         argv += ["--authkey", authkey]
     shown = ["<redacted>" if (authkey and a == authkey) else a for a in argv]
-    print("  $ %s" % " ".join(shown))
-    rc, out, err = run(argv, timeout=300)
-    combined = (out or "") + "\n" + (err or "")
+    print("  $ %s" % " ".join(shown), flush=True)
+    proc = subprocess.Popen(argv, stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT,
+                            text=True, bufsize=1)
+    url = None
+    out_lines = []
+
+    def handle_line(line):
+        nonlocal url
+        line = line.rstrip("\n")
+        out_lines.append(line)
+        print("  " + line, flush=True)
+        if url is None:
+            m = AUTH_URL_RE.search(line)
+            if m:
+                url = m.group(0)
+                print()
+                print("  ====================================================")
+                print("  To authenticate, open this URL in a browser:")
+                print("  " + url)
+                print("  ====================================================")
+                print(flush=True)
+
+    try:
+        deadline = time.monotonic() + timeout
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                proc.kill()
+                try:
+                    proc.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    pass
+                raise WizardError(
+                    "`tailscale up` timed out after %d seconds waiting for "
+                    "authentication.%s" % (
+                        timeout,
+                        " The login URL was printed above — open it in a "
+                        "browser, then re-run." if url
+                        else ""))
+            r, _, _ = select.select([proc.stdout], [], [],
+                                    min(1.0, remaining))
+            if proc.stdout in r:
+                line = proc.stdout.readline()
+                if line == "":
+                    break  # EOF: process exited
+                handle_line(line)
+            if proc.poll() is not None:
+                # exited (maybe with no output): drain anything buffered
+                for line in proc.stdout.read().splitlines():
+                    handle_line(line)
+                break
+        # reap the child so returncode is set (breaking on EOF can happen
+        # before poll() ever observed the exit)
+        rc = proc.wait()
+    finally:
+        # never leave a stray `tailscale up` blocking behind us
+        if proc.poll() is None:
+            proc.kill()
+            try:
+                proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                pass
     if rc != 0:
         raise WizardError("`tailscale up` failed (exit %d):\n%s"
-                          % (rc, combined.strip()[-2000:]))
-    m = AUTH_URL_RE.search(combined)
-    url = m.group(0) if m else None
-    if url:
-        print()
-        print("  ====================================================")
-        print("  To authenticate, open this URL in a browser:")
-        print("  %s" % url)
-        print("  ====================================================")
-        print()
-    else:
+                          % (rc, "\n".join(out_lines)[-2000:]))
+    if not url:
         print("  tailscale up succeeded with no auth URL (already logged in "
               "or using auth keys).")
     return url
@@ -415,9 +473,10 @@ def main():
 
     print("== Remote network setup ==")
     installed = check_tailscale_installed()
-    print("tailscale installed: %s%s"
-          % ("yes" + (" (%s)" % tailscale_version() if installed else ""),
-             "" if installed else "no"))
+    if installed:
+        print("tailscale installed: yes (%s)" % tailscale_version())
+    else:
+        print("tailscale installed: no")
     if args.check_only:
         if installed:
             try:
