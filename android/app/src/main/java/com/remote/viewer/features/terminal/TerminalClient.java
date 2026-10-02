@@ -65,6 +65,11 @@ public class TerminalClient implements RemoteClient.Listener {
         client.sendTerminalData(session, data);
     }
 
+    /** Resize a live terminal session (host SIGWINCHes the pty). */
+    public void resize(String session, int cols, int rows) {
+        client.sendTerminalResize(session, cols, rows);
+    }
+
     public void write(String session, String text) {
         try {
             write(session, text.getBytes("UTF-8"));
