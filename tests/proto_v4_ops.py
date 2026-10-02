@@ -297,6 +297,55 @@ def t_network_wizard_tailscale_up_streams_url():
     (status, got), dt, out = run_with_fake('echo "already up"\n', timeout=10)
     assert status == "ok" and got is None, (status, got)
     assert "no auth URL" in out, out
+def t_network_wizard_ensure_daemon():
+    # ensure_tailscaled_running(): responding -> no-op; not responding ->
+    # kill stale + (re)start via systemd or directly; still dead -> error.
+    orig = (netsetup.tailscaled_responding, netsetup.have_systemd,
+            netsetup.kill_stale_tailscaled, netsetup.start_tailscaled_nosystemd,
+            netsetup.run)
+    calls = []
+
+    def fake_run(argv, **kw):
+        calls.append(argv)
+        if argv[:2] == ["systemctl", "enable"]:
+            return (0, "", "")
+        return (1, "", "failed to connect to local tailscaled")
+
+    try:
+        # 1. daemon answering: nothing happens
+        netsetup.tailscaled_responding = lambda: True
+        netsetup.kill_stale_tailscaled = lambda: calls.append(["kill-stale"])
+        netsetup.ensure_tailscaled_running()
+        assert calls == [], calls
+        # 2. stale daemon, systemd host: kill + systemctl, then healthy
+        answers = iter([False, True])
+        netsetup.tailscaled_responding = lambda: next(answers)
+        netsetup.have_systemd = lambda: True
+        netsetup.run = fake_run
+        netsetup.ensure_tailscaled_running()
+        assert ["kill-stale"] in calls, calls
+        assert ["systemctl", "enable", "--now", "tailscaled"] in calls, calls
+        # 3. stale daemon, no systemd: kill + direct start, then healthy
+        calls.clear()
+        answers = iter([False, True])
+        netsetup.tailscaled_responding = lambda: next(answers)
+        netsetup.have_systemd = lambda: False
+        netsetup.start_tailscaled_nosystemd = lambda: calls.append(["direct-start"])
+        netsetup.ensure_tailscaled_running()
+        assert ["kill-stale"] in calls and ["direct-start"] in calls, calls
+        # 4. still dead after start -> WizardError
+        netsetup.tailscaled_responding = lambda: False
+        try:
+            netsetup.ensure_tailscaled_running()
+            raise AssertionError("expected WizardError")
+        except netsetup.WizardError as e:
+            assert "still not responding" in str(e), e
+    finally:
+        (netsetup.tailscaled_responding, netsetup.have_systemd,
+         netsetup.kill_stale_tailscaled, netsetup.start_tailscaled_nosystemd,
+         netsetup.run) = orig
+
+
 def t_network_wizard_nosystemd_helpers():
     # have_systemd() mirrors the canonical /run/systemd/system check
     assert netsetup.have_systemd() == os.path.isdir("/run/systemd/system")
@@ -429,6 +478,7 @@ def main():
     check("network wizard distro flavor", t_network_wizard_distro_flavor)
     check("network wizard static fallback", t_network_wizard_static_fallback)
     check("network wizard nosystemd helpers", t_network_wizard_nosystemd_helpers)
+    check("network wizard ensure daemon", t_network_wizard_ensure_daemon)
     check("network wizard tailscale_up streams url",
           t_network_wizard_tailscale_up_streams_url)
     check("deb build contents", t_deb_build_contents)
