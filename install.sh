@@ -90,14 +90,14 @@ done
 WANT_VERSION="${WANT_VERSION#v}"   # tolerate "v1.2.0"
 
 # ---- helpers -----------------------------------------------------------------
-log()  { echo "== $*"; }
+log()  { echo "== $*" >&2; }  # progress chatter -> stderr; stdout is reserved for data (e.g. resolve_deb's path)
 warn() { echo "WARNING: $*" >&2; }
 die()  { echo "ERROR: $*" >&2; exit 1; }
 
 # run a command; echo it first. In dry-run mode only echo, never execute.
 run() {
-    if [ "$DRY_RUN" = 1 ]; then echo "[dry-run] + $*"; return 0; fi
-    echo "+ $*"
+    if [ "$DRY_RUN" = 1 ]; then echo "[dry-run] + $*" >&2; return 0; fi
+    echo "+ $*" >&2
     "$@"
 }
 
@@ -105,8 +105,8 @@ run() {
 # real argv (for commands carrying secrets: the secret never hits the log).
 run_display() {
     local disp="$1"; shift
-    if [ "$DRY_RUN" = 1 ]; then echo "[dry-run] + $disp"; return 0; fi
-    echo "+ $disp"
+    if [ "$DRY_RUN" = 1 ]; then echo "[dry-run] + $disp" >&2; return 0; fi
+    echo "+ $disp" >&2
     "$@"
 }
 
@@ -171,7 +171,7 @@ resolve_deb() {
     deb="$tmpd/remote_${ver}_all.deb"
     log "downloading $url"
     if [ "$DRY_RUN" = 1 ]; then
-        echo "[dry-run] + curl -fsSL $url -o $deb"
+        echo "[dry-run] + curl -fsSL $url -o $deb" >&2
         echo "$deb"
         return 0
     fi
@@ -268,7 +268,7 @@ setup_password() {
         return 0
     fi
     if [ "$ASSUME_YES" = 1 ] || [ "$DRY_RUN" = 1 ] || [ ! -t 0 ]; then
-        [ "$DRY_RUN" = 1 ] && { echo "[dry-run] + remote-set-password (interactive prompt)"; return 0; }
+        [ "$DRY_RUN" = 1 ] && { echo "[dry-run] + remote-set-password (interactive prompt)" >&2; return 0; }
         die "no password provided and running non-interactively. Fix: set REMOTE_PASSWORD env var (or --password) and re-run."
     fi
     log "no password set yet — prompting (input hidden)"
