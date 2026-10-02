@@ -17,7 +17,68 @@ Wire protocol is documented in [PROTOCOL.md](PROTOCOL.md) (currently v4) —
 both viewers speak the same protocol. The roadmap lives in
 [FEATURES.md](FEATURES.md).
 
+## Install as a tool (one command)
+
+Any Debian/Ubuntu machine — including a Linux agent's box — becomes a
+fully working Remote host with one command:
+
+```bash
+curl -fsSL https://github.com/kilomene/Remote/releases/latest/download/install.sh \
+  | sudo bash
+```
+
+Prefer to inspect first (recommended):
+
+```bash
+curl -fsSL https://github.com/kilomene/Remote/releases/latest/download/install.sh \
+  -o /tmp/install-remote.sh
+less /tmp/install-remote.sh
+sudo bash /tmp/install-remote.sh
+```
+
+The installer is idempotent (safe to re-run) and does everything end to
+end: downloads the latest `.deb` from GitHub Releases, installs it with
+dependency resolution, installs Tailscale (official apt repo) and runs
+`tailscale up`, installs `v4l2loopback-dkms` (Camera for Verification),
+sets the host password, enables + starts the `remote-host` systemd
+service, verifies it's active, and prints a status summary with the
+Tailscale IP and pairing instructions.
+
+**Headless / agent use** — no prompts at all (needs a Tailscale auth key
+and a password):
+
+```bash
+curl -fsSL https://github.com/kilomene/Remote/releases/latest/download/install.sh \
+  -o /tmp/install-remote.sh
+sudo TS_AUTHKEY=tskey-... REMOTE_PASSWORD=... \
+  bash /tmp/install-remote.sh --yes
+```
+
+Environment / flags: `TS_AUTHKEY` (`--authkey`), `REMOTE_PASSWORD`
+(`--password`, env preferred — a flag is visible in `ps`),
+`HEADSCALE_URL` (`--headscale`) for a self-hosted control plane,
+`REMOTE_VERSION` (`--version`) to pin a release, `--deb PATH` for a
+local `.deb`, `--dry-run` to preview, `--no-systemd` for containers
+(prints the manual `remote-host` command instead),
+`--uninstall` to remove. Secrets are never echoed or logged.
+
+**Verify** it worked:
+
+```bash
+systemctl is-active remote-host
+tailscale ip -4
+sudo yourremote-pair-code   # pair your phone with the printed code
+```
+
+**Uninstall:** `sudo bash install.sh --uninstall`
+(or `sudo apt purge remote`; config in `/etc/remote` and logs in
+`/var/log/remote` can be wiped with
+`sudo rm -rf /etc/remote /var/log/remote`).
+
 ## Install (host)
+
+Manual path, step by step (the one-command installer above does all of
+this for you).
 
 Requirements: a Debian/Ubuntu machine with Tailscale installed and logged in
 (`tailscale status` shows your 100.x.x.x address), X11 or Wayland desktop
@@ -251,8 +312,9 @@ bash android/build-apk.sh              # -> out/remote-viewer.apk
 bash tests/selftest.sh
 ```
 
-Releases: pushing a tag `v*` builds both artifacts in GitHub Actions and
-attaches `remote_*_all.deb` + `remote-viewer.apk` to the GitHub release.
+Releases: pushing a tag `v*` builds all artifacts in GitHub Actions and
+attaches `remote_*_all.deb` + `remote-viewer.apk` + `install.sh` to the
+GitHub release.
 
 ## What v1.1.0 does NOT do yet
 
