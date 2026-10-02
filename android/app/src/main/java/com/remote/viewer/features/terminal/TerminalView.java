@@ -72,8 +72,12 @@ public class TerminalView extends View {
         setBackgroundColor(Color.BLACK);
         setFocusable(true);
         setFocusableInTouchMode(true);
-        paint.setTypeface(android.graphics.Typeface.MONOSPACE);
+        // Termux-style: clean monospace, subpixel rendering for sharp text.
+        paint.setTypeface(android.graphics.Typeface.create(
+                android.graphics.Typeface.MONOSPACE,
+                android.graphics.Typeface.NORMAL));
         paint.setAntiAlias(true);
+        paint.setSubpixelText(true);
         reset();
     }
 
