@@ -4,8 +4,9 @@
 Replays EXACTLY what the Android viewer sends, using a from-scratch
 implementation (no shared code with host/viewer).
 
-v3: handshake advertises REMOTE/3, SYSTEM_CMD allowlist (every allowed
-    command returns ok -- dry-run in self-test; "rm -rf /" is rejected;
+v3: handshake advertises REMOTE/4 (the v4 host is a superset of v3),
+    SYSTEM_CMD allowlist (every allowed command returns ok -- dry-run in
+    self-test; "rm -rf /" is rejected;
     "service" only touches monitored_services), TERMINAL round-trip
     (open -> echo hello-v3 -> close) + 8-session cap, AGENT_QUERY ->
     AGENT_STATUS shape (+ services override), DISPLAYS_QUERY ->
@@ -39,7 +40,9 @@ PERMS_LIST, PERMS_LIST_RESP = 0x83, 0x84
 FILE_LIST = 0x50
 
 # background traffic the harness must tolerate while waiting
-BACKGROUND = (FRAME, PONG, CLIPBOARD_SET, TERMINAL_DATA, TERMINAL_CLOSE, CHAT_MSG)
+SESSION_TOKEN, SESSION_ROTATE = 0x85, 0x86
+BACKGROUND = (FRAME, PONG, CLIPBOARD_SET, TERMINAL_DATA, TERMINAL_CLOSE,
+              CHAT_MSG, SESSION_TOKEN, SESSION_ROTATE)
 
 
 def send(sock, mtype, payload=b""):
@@ -118,7 +121,7 @@ def main():
     ok_payload = do_handshake(a, password, {"device_id": "harness-v3-1",
                                             "device_name": "Harness V3",
                                             "platform": "android"})
-    check(ok_payload == b"REMOTE/3", "AUTH_OK advertises REMOTE/3, got %r" % ok_payload)
+    check(ok_payload == b"REMOTE/4", "AUTH_OK advertises REMOTE/4, got %r" % ok_payload)
 
     # --- displays -------------------------------------------------------------
     send(a, DISPLAYS_QUERY, b"{}")
@@ -329,7 +332,8 @@ def main():
         return json.loads(payload.decode())
 
     flags = ("view", "mouse", "keyboard", "clipboard", "files",
-             "terminal", "system")
+             "terminal", "system", "audio", "webcam", "apps",
+             "automation", "camera")  # the twelve v4 flags (superset of v3's seven)
     full = {f: True for f in flags}
     restricted = dict(full)
     restricted.update({"mouse": False, "keyboard": False, "clipboard": False,
