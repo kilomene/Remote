@@ -10,6 +10,8 @@ import java.security.SecureRandom;
 import java.util.Arrays;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 import org.json.JSONException;
@@ -61,6 +63,13 @@ public class RemoteClient {
     private final String password;
     private final Listener listener;
     private final ExecutorService net = Executors.newCachedThreadPool();
+    /**
+     * Dedicated single-thread sender: every socket write in the app funnels
+     * through send(), and callers include the UI thread (taps, dialogs,
+     * buttons). Writing here keeps all network I/O off the main thread
+     * (NetworkOnMainThreadException) while preserving send order.
+     */
+    private final ExecutorService sender = Executors.newSingleThreadExecutor();
     private final AtomicBoolean stop = new AtomicBoolean(false);
     private final SecureRandom random = new SecureRandom();
 
@@ -95,18 +104,30 @@ public class RemoteClient {
     public void stop() {
         stop.set(true);
         net.shutdownNow();
+        // Drain queued sends (e.g. DISCONNECT) before closing the socket.
+        sender.shutdown();
+        try {
+            sender.awaitTermination(1, TimeUnit.SECONDS);
+        } catch (InterruptedException ignored) {
+        }
         closeOut();
     }
 
     // ---- outbound -----------------------------------------------------------
 
     private void send(int type, byte[] payload) {
-        OutputStream o = out;
-        if (o == null) return;
+        final OutputStream o = out;
+        if (o == null || sender.isShutdown()) return;
         try {
-            RemoteProto.sendMsg(o, type, payload);
-            txBytes.addAndGet(5L + (payload == null ? 0 : payload.length));
-        } catch (IOException ignored) {
+            sender.execute(() -> {
+                try {
+                    RemoteProto.sendMsg(o, type, payload);
+                    txBytes.addAndGet(5L + (payload == null ? 0 : payload.length));
+                } catch (IOException ignored) {
+                }
+            });
+        } catch (RejectedExecutionException ignored) {
+            // stop() already ran; nothing to send on.
         }
     }
 
@@ -165,13 +186,27 @@ public class RemoteClient {
             JSONObject o = new JSONObject();
             o.put("path", path);
             o.put("size", size);
-            send(RemoteProto.FILE_PUT, o.toString().getBytes(UTF8));
+            sendNow(RemoteProto.FILE_PUT, o.toString().getBytes(UTF8));
         } catch (JSONException ignored) {
         }
     }
 
     public void sendFileData(byte[] buf, int off, int len) {
-        send(RemoteProto.FILE_DATA, Arrays.copyOfRange(buf, off, off + len));
+        sendNow(RemoteProto.FILE_DATA, Arrays.copyOfRange(buf, off, off + len));
+    }
+
+    /** Direct socket write for bulk producers that already run on a
+     *  dedicated background thread (file upload thread, camera sender).
+     *  Keeps natural socket backpressure and preserves message order
+     *  within that producer. NEVER call from the UI thread. */
+    private void sendNow(int type, byte[] payload) {
+        OutputStream o = out;
+        if (o == null) return;
+        try {
+            RemoteProto.sendMsg(o, type, payload);
+            txBytes.addAndGet(5L + (payload == null ? 0 : payload.length));
+        } catch (IOException ignored) {
+        }
     }
 
     public void sendFileDone(String path, long size) {
@@ -179,7 +214,9 @@ public class RemoteClient {
             JSONObject o = new JSONObject();
             o.put("path", path);
             o.put("size", size);
-            send(RemoteProto.FILE_DONE, o.toString().getBytes(UTF8));
+            // upload thread: keep Put/Data/Done on the same direct path
+            // so ordering is preserved.
+            sendNow(RemoteProto.FILE_DONE, o.toString().getBytes(UTF8));
         } catch (JSONException ignored) {
         }
     }
@@ -313,10 +350,12 @@ public class RemoteClient {
     /**
      * 0x89 CAMERA_FRAME c->s: one Annex-B access unit. Called from the
      * camera sender thread; RemoteProto.sendMsg serializes on the stream.
+     * Uses the direct path (already a background thread) to keep
+     * backpressure instead of queueing frames.
      */
     public void sendCameraFrame(byte[] accessUnit) {
         if (accessUnit == null || accessUnit.length == 0) return;
-        send(RemoteProto.CAMERA_FRAME, accessUnit);
+        sendNow(RemoteProto.CAMERA_FRAME, accessUnit);
     }
 
     private static byte[] jsonPath(String path) {
