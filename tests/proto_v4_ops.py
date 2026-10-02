@@ -11,6 +11,7 @@ Exit 0 and print "V4-OPS CHECKS PASSED" on success. No network access.
 """
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -235,6 +236,67 @@ def t_network_wizard_distro_flavor():
     assert netsetup.distro_repo_flavor("/nonexistent/os-release") == "ubuntu"
 
 
+def t_network_wizard_tailscale_up_streams_url():
+    # regression (found by a real install run): `tailscale up` prints the
+    # login URL then BLOCKS waiting for browser auth. The wizard must show
+    # the URL the moment it appears — not after the process exits/times out.
+    import io
+    import time
+    import stat
+
+    def fake_tailscale(dirpath, body):
+        path = os.path.join(dirpath, "tailscale")
+        with open(path, "w") as f:
+            f.write("#!/usr/bin/env bash\n" + body)
+        os.chmod(path, 0o755)
+
+    def run_with_fake(body, **kw):
+        d = tempfile.mkdtemp(prefix="fake-tailscale-")
+        try:
+            fake_tailscale(d, body)
+            old_path = os.environ.get("PATH", "")
+            os.environ["PATH"] = d + os.pathsep + old_path
+            buf = io.StringIO()
+            old_stdout = sys.stdout
+            sys.stdout = buf
+            try:
+                t0 = time.monotonic()
+                try:
+                    result = ("ok", netsetup.tailscale_up(**kw))
+                except netsetup.WizardError as e:
+                    result = ("error", str(e))
+                dt = time.monotonic() - t0
+            finally:
+                sys.stdout = old_stdout
+                os.environ["PATH"] = old_path
+            return result, dt, buf.getvalue()
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+    url = "https://login.tailscale.com/a/1234567890abcdef"
+    # fake prints the URL, blocks 4s, exits 0
+    (status, got), dt, out = run_with_fake(
+        'echo "To authenticate, visit:"\n'
+        'echo "%s"\n'
+        "sleep 4\n" % url, timeout=30)
+    assert status == "ok", got
+    assert got == url, got
+    assert "To authenticate, open this URL in a browser:" in out, out
+    assert url in out, out
+    assert 3.5 <= dt < 30, \
+        "should return when the process exits (~4s), took %.1fs" % dt
+    # timeout path: URL seen but process never exits -> error mentions URL
+    (status, got), dt, out = run_with_fake(
+        'echo "%s"\n'
+        "sleep 60\n" % url, timeout=3)
+    assert status == "error", got
+    assert "login URL" in got, got
+    assert "To authenticate, open this URL in a browser:" in out, out
+    assert dt < 15, "timeout took too long: %.1fs" % dt
+    # clean exit, no URL (already logged in / authkey)
+    (status, got), dt, out = run_with_fake('echo "already up"\n', timeout=10)
+    assert status == "ok" and got is None, (status, got)
+    assert "no auth URL" in out, out
 def t_network_wizard_static_fallback():
     # arch mapping
     assert netsetup.static_arch("x86_64") == "amd64"
@@ -331,6 +393,8 @@ def main():
     check("network wizard --help + steps", t_network_wizard_help_and_steps)
     check("network wizard distro flavor", t_network_wizard_distro_flavor)
     check("network wizard static fallback", t_network_wizard_static_fallback)
+    check("network wizard tailscale_up streams url",
+          t_network_wizard_tailscale_up_streams_url)
     check("deb build contents", t_deb_build_contents)
     if FAILURES:
         print("\n%d FAILURES" % len(FAILURES))
