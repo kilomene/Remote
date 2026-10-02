@@ -223,6 +223,38 @@ for h in capture auth media sys files ops camera pair_client; do
 done
 pass "v4: capture, auth, media, sys, files, ops, camera, pair_client all green"
 
+echo "=== [11b/11] camera H264 decode loopback (real ffmpeg) ==="
+python3 tests/proto_v4_camera_decode.py >"$TMP/v4_camera_decode.log" 2>&1 \
+    || { tail -20 "$TMP/v4_camera_decode.log"; fail "camera decode loopback failed"; }
+tail -1 "$TMP/v4_camera_decode.log" | sed 's/^/  /'
+grep -q "CAMERA DECODE LOOPBACK PASSED\|^skip" "$TMP/v4_camera_decode.log" \
+    || fail "camera decode loopback did not pass"
+pass "camera: Annex-B access units decode cleanly with the real ffmpeg"
+
+echo "=== [11c/11] Android CameraProtocol JVM unit tests ==="
+JAVAC_BIN=""
+if command -v javac >/dev/null 2>&1; then JAVAC_BIN=javac;
+elif [ -x "$HOME/workspace/jdk/jdk-17.0.20.1+1/bin/javac" ]; then
+    JAVAC_BIN="$HOME/workspace/jdk/jdk-17.0.20.1+1/bin/javac";
+fi
+if [ -n "$JAVAC_BIN" ]; then
+    JC_TMP="$(mktemp -d)"
+    "$JAVAC_BIN" -d "$JC_TMP" \
+        android/app/src/main/java/com/remote/viewer/features/camera/CameraProtocol.java \
+        tests/CameraProtocolTest.java \
+        || fail "CameraProtocol JVM test did not compile"
+    "${JAVAC_BIN%javac}java" -cp "$JC_TMP" CameraProtocolTest \
+        >"$TMP/camproto.log" 2>&1 \
+        || { tail -20 "$TMP/camproto.log"; fail "CameraProtocol JVM test failed"; }
+    tail -1 "$TMP/camproto.log" | sed 's/^/  /'
+    grep -q "CAMERA-PROTOCOL JVM TESTS PASSED" "$TMP/camproto.log" \
+        || fail "CameraProtocol JVM tests did not pass"
+    rm -rf "$JC_TMP"
+    pass "CameraProtocol: 14 JVM checks green"
+else
+    echo "  skip: no javac available"
+fi
+
 echo
 echo "=============================="
 echo "ALL SELF-TESTS PASSED"
