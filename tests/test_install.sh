@@ -394,6 +394,26 @@ rm -f "$TMP/Xorg" "$TMP/fake.Xauthority"; rm -rf /tmp/.X11-unix
 echo "$OUT17" | grep -q "|:9|$TMP/fake.Xauthority$" \
     || fail "detection failed, got: [$OUT17]"
 pass "detect_desktop_session finds Xorg, display :9, environ XAUTHORITY"
+# Xvfb (container desktops) with an XAUTHORITY that doesn't exist on disk:
+# display is still reported, cookie left empty (best-effort).
+cp /bin/sleep "$TMP/Xvfb"
+mkdir -p /tmp/.X11-unix
+python3 -c "
+import socket, time
+s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+s.bind('/tmp/.X11-unix/X7')
+time.sleep(20)
+" &
+SOCKPID=$!
+XAUTHORITY=/nonexistent/cookie "$TMP/Xvfb" 600 &
+XVPID=$!
+sleep 1
+OUT17B="$(PATH="$TMP:/usr/bin:/bin" bash -c 'source "$1"; detect_desktop_session' _ "$TMP/detect_fn.sh")"
+kill "$XVPID" "$SOCKPID" 2>/dev/null || true
+rm -f "$TMP/Xvfb"; rm -rf /tmp/.X11-unix
+echo "$OUT17B" | grep -q "|:7|$" \
+    || fail "Xvfb detection failed, got: [$OUT17B]"
+pass "detect_desktop_session finds Xvfb with display but no cookie"
 # negative: no X running
 OUT17N="$(bash -c 'source "$1"; detect_desktop_session; echo "rc=$?"' _ "$TMP/detect_fn.sh")"
 echo "$OUT17N" | grep -q "rc=1" || fail "expected rc=1 with no X, got: [$OUT17N]"
