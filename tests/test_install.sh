@@ -370,6 +370,66 @@ grep -q "is older than" "$OUT" || fail "expected upgrade log message"
 unset STUB_REMOTE_VERSION STUB_V4L2 REMOTE_HOST_CONF
 pass "older install upgrades; newer install still skips (covered by [3])"
 
+echo "=== [17] detect_desktop_session finds a fake X session ==="
+awk '/^detect_desktop_session\(\)/,/^}/' install.sh > "$TMP/detect_fn.sh"
+bash -n "$TMP/detect_fn.sh" || fail "detect_fn syntax"
+# fake Xorg (comm=Xorg), X socket, and XAUTHORITY in its environ
+cp /bin/sleep "$TMP/Xorg"
+mkdir -p /tmp/.X11-unix
+python3 -c "
+import socket, time
+s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+s.bind('/tmp/.X11-unix/X9')
+time.sleep(20)
+" &
+SOCKPID=$!
+echo "fake-cookie" > "$TMP/fake.Xauthority"
+XAUTHORITY="$TMP/fake.Xauthority" "$TMP/Xorg" 600 &
+XORGPID=$!
+sleep 1
+# run detection with PATH limited so only the fake Xorg matches
+OUT17="$(PATH="$TMP:/usr/bin:/bin" bash -c 'source "$1"; detect_desktop_session' _ "$TMP/detect_fn.sh")"
+kill "$XORGPID" "$SOCKPID" 2>/dev/null || true
+rm -f "$TMP/Xorg" "$TMP/fake.Xauthority"; rm -rf /tmp/.X11-unix
+echo "$OUT17" | grep -q "|:9|$TMP/fake.Xauthority$" \
+    || fail "detection failed, got: [$OUT17]"
+pass "detect_desktop_session finds Xorg, display :9, environ XAUTHORITY"
+# negative: no X running
+OUT17N="$(bash -c 'source "$1"; detect_desktop_session; echo "rc=$?"' _ "$TMP/detect_fn.sh")"
+echo "$OUT17N" | grep -q "rc=1" || fail "expected rc=1 with no X, got: [$OUT17N]"
+pass "detect_desktop_session empty when no X session"
+
+echo "=== [18] remote-set-password hands host.conf to the yourremote user ==="
+python3 - <<'EOF' || fail "ownership test failed"
+import os, sys, pwd, tempfile
+sys.path.insert(0, "host")
+import remote_set_password as rsp
+try:
+    want_uid = pwd.getpwnam("yourremote").pw_uid
+except KeyError:
+    print("SKIP: no yourremote user on this machine")
+    sys.exit(0)
+assert os.geteuid() == 0, "need root for the chown path"
+d = tempfile.mkdtemp(prefix="rsp-own-")
+try:
+    p = os.path.join(d, "host.conf")
+    rsp.DEFAULT_CONFIG = p   # exercise the default-path branch
+    rsp.set_password("ownership-test-pw", p)
+    st = os.stat(p)
+    assert st.st_uid == want_uid, "host.conf not owned by yourremote"
+    assert oct(st.st_mode & 0o777) == "0o600", "host.conf not 0600"
+    # non-default path: ownership left alone
+    p2 = os.path.join(d, "other.conf")
+    rsp.set_password("ownership-test-pw", p2)
+    assert os.stat(p2).st_uid == 0, "custom path should keep root ownership"
+    print("ownership: OK")
+finally:
+    import shutil
+    shutil.rmtree(d, ignore_errors=True)
+    rsp.DEFAULT_CONFIG = "/etc/remote/host.conf"
+EOF
+pass "host.conf ownership correct"
+
 echo
 echo "==============================="
 echo "ALL INSTALL TESTS PASSED"
