@@ -108,8 +108,10 @@ class PairingManager:
                 json.dump({"codes": codes}, f, indent=2)
             os.chmod(tmp, 0o600)
             os.replace(tmp, self.path)
+            return True
         except OSError as exc:
             LOG.warning("cannot persist pairing codes: %s", exc)
+            return False
 
     def prune_expired(self):
         """Drop expired codes. Returns number of codes remaining."""
@@ -123,7 +125,11 @@ class PairingManager:
             return len(kept)
 
     def issue_code(self, device_name=""):
-        """Issue a fresh single-use 6-digit code (never reuses a live one)."""
+        """Issue a fresh single-use 6-digit code (never reuses a live one).
+
+        Raises OSError if the code cannot be persisted — the caller must
+        surface this instead of handing out a code that can never redeem.
+        """
         with self._lock:
             codes = self._read()
             live = {c["code"] for c in codes
@@ -135,7 +141,8 @@ class PairingManager:
             codes.append({"code": code,
                           "issued_at": time.time(),
                           "device_name": device_name})
-            self._write(codes)
+            if not self._write(codes):
+                raise OSError("cannot write pairing store %s" % self.path)
             return code
 
     def redeem(self, code):
