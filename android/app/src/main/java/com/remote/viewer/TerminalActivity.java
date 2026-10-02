@@ -164,8 +164,13 @@ public class TerminalActivity extends Activity {
         tabBar.addView(tab.tabBtn);
         tabs.add(tab);
         activate(tab);
-        // 80x24 is a sane default; TerminalView reports its real grid.
-        term.open(80, 24, new TerminalClient.SessionListener() {
+        openTabWithFit(tab);
+    }
+
+    /** Opens the host session using the view's already-fitted grid. */
+    private void openTabSession(final Tab tab) {
+        term.open(tab.view.getCols(), tab.view.getRows(),
+                new TerminalClient.SessionListener() {
             @Override public void onOpened(String session) {
                 ui.post(() -> {
                     tab.sessionId = session;
@@ -185,6 +190,27 @@ public class TerminalActivity extends Activity {
             }
         });
         tab.view.requestFocus();
+    }
+
+    /**
+     * Fits the terminal grid to the view's measured size, opens the session
+     * with the fitted size, and keeps the host pty in sync on later changes
+     * (rotation, window resize). The session is opened only after the first
+     * layout pass so the grid matches the phone's screen from the start.
+     */
+    private void openTabWithFit(final Tab tab) {
+        // Resize the host pty whenever the fitted grid changes.
+        tab.view.setOnGridSizeListener((cols, rows) -> {
+            if (tab.sessionId != null && term != null) {
+                term.resize(tab.sessionId, cols, rows);
+            }
+        });
+        // Defer the open until the view is measured so the grid is real.
+        tab.view.post(() -> {
+            int[] fit = tab.view.fitGrid();
+            tab.view.resizeGrid(fit[0], fit[1]);
+            openTabSession(tab);
+        });
     }
 
     private void activate(Tab tab) {
