@@ -206,13 +206,22 @@ deb_installed_version() {
 
 install_deb() {
     local deb="$1" want_ver="$2"
-    local installed
+    local installed deb_ver
     installed="$(deb_installed_version)"
-    if [ -n "$installed" ] && { [ -z "$want_ver" ] || [ "$installed" = "$want_ver" ]; }; then
+    deb_ver=""
+    if have dpkg-deb; then
+        deb_ver="$(dpkg-deb -f "$deb" Version 2>/dev/null || true)"
+    fi
+    # Skip only when the installed version is at least as new as the deb we
+    # are about to install. A "latest" run with an older version installed
+    # upgrades instead of silently skipping (seen live: 1.2.1 kept while
+    # the installer downloaded 1.2.4).
+    if [ -n "$installed" ] && [ -n "$deb_ver" ] \
+        && dpkg --compare-versions "$installed" ge "$deb_ver" 2>/dev/null; then
         log "remote $installed already installed — skipping (re-run with --version to change)"
         return 0
     fi
-    [ -n "$installed" ] && log "installed version $installed differs from requested ${want_ver:-latest} — upgrading"
+    [ -n "$installed" ] && log "installed version $installed is older than ${deb_ver:-the package} — upgrading"
     export DEBIAN_FRONTEND=noninteractive
     log "installing $deb (dependencies resolved via apt)"
     if ! run apt-get install -y "$deb"; then
