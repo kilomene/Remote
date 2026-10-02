@@ -351,11 +351,16 @@ start_host_nosystemd() {
         local xuser="${sess%%|*}" rest="${sess#*|}"
         local display="${rest%%|*}" xauth="${rest#*|}"
         log "desktop session: user=$xuser display=$display"
-        cp -f "$xauth" /etc/remote/xauthority \
-            || die "could not copy X authority cookie from $xauth"
-        chown yourremote:yourremote /etc/remote/xauthority
-        chmod 600 /etc/remote/xauthority
-        xenv="DISPLAY=$display XAUTHORITY=/etc/remote/xauthority"
+        xenv="DISPLAY=$display"
+        if [ -n "$xauth" ]; then
+            cp -f "$xauth" /etc/remote/xauthority \
+                || die "could not copy X authority cookie from $xauth"
+            chown yourremote:yourremote /etc/remote/xauthority
+            chmod 600 /etc/remote/xauthority
+            xenv="$xenv XAUTHORITY=/etc/remote/xauthority"
+        else
+            log "no XAUTHORITY cookie found — trying without one"
+        fi
     else
         warn "no desktop X session detected — remote-host needs a display for screen capture."
     fi
@@ -377,9 +382,14 @@ start_host_nosystemd() {
 }
 
 # Prints "user|display|xauthority" for the graphical X session, or nothing.
+# Matches Xorg, Xwayland, and the container-typical Xvfb / Xvnc servers.
 detect_desktop_session() {
-    local xpid xuser xauth display sock
-    xpid="$(pgrep -o -x Xorg 2>/dev/null || pgrep -o -x Xwayland 2>/dev/null || true)"
+    local xpid xuser xauth display sock name
+    xpid=""
+    for name in Xorg Xwayland Xvfb Xvnc Xvnc4 Xtigervnc X; do
+        xpid="$(pgrep -o -x "$name" 2>/dev/null || true)"
+        [ -n "$xpid" ] && break
+    done
     [ -n "$xpid" ] || return 1
     xuser="$(ps -o user= -p "$xpid" 2>/dev/null | tr -d '[:space:]')"
     [ -n "$xuser" ] || return 1
@@ -388,11 +398,13 @@ detect_desktop_session() {
         if [ -S "$sock" ]; then display=":${sock##*/X}"; break; fi
     done
     [ -n "$display" ] || display=":0"
+    # XAUTHORITY is best-effort: some servers (Xvfb/xhost setups) need no
+    # cookie. Only pass it when we actually find the file.
     xauth="$(tr '\0' '\n' < "/proc/$xpid/environ" 2>/dev/null | grep '^XAUTHORITY=' | cut -d= -f2-)"
     if [ -z "$xauth" ]; then
         xauth="$(getent passwd "$xuser" 2>/dev/null | cut -d: -f6)/.Xauthority"
     fi
-    [ -n "$xauth" ] && [ -f "$xauth" ] || return 1
+    [ -f "$xauth" ] || xauth=""
     printf '%s|%s|%s' "$xuser" "$display" "$xauth"
 }
 
