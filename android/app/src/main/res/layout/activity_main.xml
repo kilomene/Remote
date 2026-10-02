@@ -81,13 +81,6 @@
             android:layout_marginTop="8dp"
             android:text="@string/tagline" />
 
-        <Button
-            android:id="@+id/btn_pair"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="16dp"
-            android:text="@string/pair_title" />
-
         <LinearLayout
             android:id="@+id/saved_list"
             android:layout_width="match_parent"
