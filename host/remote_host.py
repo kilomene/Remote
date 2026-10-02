@@ -1,19 +1,31 @@
 #!/usr/bin/env python3
-"""remote-host: the controlled side of Remote.
+"""remote-host: the controlled side of Remote (protocol v4, 1.0.0).
 
-Listens on TCP (default 47800), authenticates the viewer with a
-challenge-response password handshake, then streams JPEG screen frames,
-injects the viewer's mouse/keyboard input, syncs clipboards, serves
-file transfers (protocol v2), and handles v3 features: whitelisted
-system commands, pty-backed remote terminal, agent status, display
-listing, and session chat.
+Listens on TCP (default 47800), runs the v4 pre-auth phase (DEVICE_HELLO,
+optional PAIR_REQUEST pairing-code redemption, pairing policy), then the
+password challenge-response handshake, then serves the session:
 
-X11 is the capture target (mss). Wayland capture is not yet supported.
+  * adaptive JPEG screen frames (X11, or Wayland via xdg-desktop-portal;
+    FPS/quality ladder driven by measured send latency)
+  * input injection (mouse/keyboard, incl. dblclick/hscroll/rel/text)
+  * clipboard sync (text + image/png)
+  * jailed file transfer
+  * allowlisted system commands (+ launch-app via apps.py, pause-screen)
+  * pty-backed remote terminal (resize, validated shell/env)
+  * agent status (+ devtools), display listing, session chat
+  * per-device 12-flag permissions, enforced fail-closed
+  * remote audio (PulseAudio/PipeWire, Opus or PCM1 wire format)
+  * webcam single-frame capture
+  * Tailscale net status, privacy policy toggles, automation exec
+  * camera-for-verification: phone H264 -> /dev/video0 via v4l2loopback
+
+Message dispatch goes through host/plugins.py (PluginRegistry).
 """
 import argparse
 import base64
 import datetime
 import hashlib
+import hmac
 import json
 import logging
 import os
@@ -28,34 +40,61 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "common"))
 
 import remote_proto as proto
-from file_transfer import FileTransfer, JailError, CHUNK as FILE_CHUNK
+from files import FileTransfer, JailError, CHUNK as FILE_CHUNK
 from sys_cmd import SysCmdExecutor
 from terminal import TerminalManager, TerminalError
-from agent_status import collect_status
+from monitor import collect_status
 from displays import get_displays
 from chat import ChatLog
+from clipboard import ClipboardSync
+from capture import (make_capture, TestPatternCapture, encode_jpeg,
+                     set_privacy, AdaptiveController)
+from input import InputInjector, TestInputSink
+from auth import (get_or_create_device_id, PairingManager, RateLimiter,
+                  SessionTokens, DeviceStore)
+from net import net_status_payload
+from policy import Policy
+from jlog import JsonLogger
+from plugins import PluginRegistry
+from audio import AudioCapture, AudioError, list_sources as audio_list_sources
+from webcam import list_cameras, grab_frame, WebcamError
+from camera_virtual import VirtualCameraManager, CameraError
+from automation import AutomationEngine
+from devtools import detect_devtools
 
 LOG = logging.getLogger("remote-host")
 
 DEFAULT_CONFIG = "/etc/remote/host.conf"
 DEFAULT_TRUSTED = "/etc/remote/trusted_devices"
 DEFAULT_CONN_LOG = "/var/log/remote/connections.log"
-FRAME_FPS = 12
-JPEG_QUALITY = 60
+DEFAULT_JLOG = "/var/log/remote/remote.jsonl"
+DEFAULT_POLICY_CONF = "/etc/remote/policy.conf"
+DEFAULT_PAIRING_PATH = "/etc/remote/pairing_codes"
+DEFAULT_DEVICE_ID_PATH = "/etc/remote/device-id"
+DEFAULT_COMMANDS_CONF = "/etc/remote/commands.conf"
 
 
-def ensure_vendor():
-    """Make vendored pure-python wheels (mss, pynput) importable if the
-    system does not provide them."""
+def sd_notify(state):
+    """Minimal systemd NOTIFY_SOCKET sender (stdlib only). Returns True when
+    the datagram was accepted. No-op (False) when NOTIFY_SOCKET is unset."""
+    addr = os.environ.get("NOTIFY_SOCKET")
+    if not addr:
+        return False
     try:
-        import mss  # noqa: F401
-        return
-    except ImportError:
-        pass
-    for d in (os.environ.get("REMOTE_VENDOR_DIR"), "/opt/remote/vendor"):
-        if d and os.path.isdir(d):
-            sys.path.insert(0, d)
-            return
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+        try:
+            s.sendto(state.encode(), addr)
+        finally:
+            s.close()
+        return True
+    except OSError:
+        return False
+
+
+def _watchdog_loop(stop):
+    """sd WATCHDOG=1 every 30s (the unit sets WatchdogSec=60)."""
+    while not stop.wait(30):
+        sd_notify("WATCHDOG=1")
 
 
 def load_config(path):
@@ -66,259 +105,21 @@ def load_config(path):
         key = base64.b64decode(cfg["key"])
         file_root = cfg.get("file_root") or os.path.expanduser("~")
         monitored = cfg.get("monitored_services") or ["remote-host", "tailscaled"]
-        return salt, key, file_root, monitored
+        fps = cfg.get("fps") or 30
+        if fps not in (15, 30, 45, 60):
+            raise ValueError("fps must be one of 15/30/45/60")
+        return salt, key, file_root, monitored, fps
     except (OSError, KeyError, ValueError) as exc:
         raise SystemExit("cannot load %s: %s (run remote-set-password first)" % (path, exc))
 
 
-# ---------------------------------------------------------------- capture
-# (unchanged from v1)
+class _PreAuthStop(Exception):
+    """Pre-auth denial that is not a password failure (blocked device,
+    pairing required). rate_limit controls the RateLimiter recording."""
 
-class ScreenCapture:
-    """mss-based X11 capture. Raises RuntimeError if unavailable."""
-
-    def __init__(self):
-        ensure_vendor()
-        try:
-            import mss as mss_mod
-        except ImportError as exc:
-            raise RuntimeError("mss not available: %s" % exc)
-        self._mss = mss_mod.mss()
-        self._mon = self._mss.monitors[1]
-        LOG.info("capturing monitor %sx%s", self._mon["width"], self._mon["height"])
-
-    @property
-    def size(self):
-        return self._mon["width"], self._mon["height"]
-
-    def grab(self):
-        shot = self._mss.grab(self._mon)
-        # shot.rgb is raw RGB bytes
-        from PIL import Image
-        return Image.frombytes("RGB", shot.size, shot.rgb)
-
-
-class TestPatternCapture:
-    """Synthetic frames for --self-test (no X server needed)."""
-
-    def __init__(self, width=320, height=240):
-        self.width, self.height = width, height
-        self.n = 0
-
-    @property
-    def size(self):
-        return self.width, self.height
-
-    def grab(self):
-        from PIL import Image, ImageDraw
-        img = Image.new("RGB", (self.width, self.height), (20, 20, 30))
-        d = ImageDraw.Draw(img)
-        # color bars
-        bars = [(200, 40, 40), (40, 200, 40), (40, 40, 200), (200, 200, 40)]
-        bw = self.width // 4
-        for i, col in enumerate(bars):
-            d.rectangle([i * bw, 0, (i + 1) * bw, self.height // 3], fill=col)
-        # moving block encodes the frame counter
-        x = (self.n * 17) % (self.width - 40)
-        d.rectangle([x, self.height // 2, x + 40, self.height // 2 + 40], fill=(240, 240, 240))
-        # frame number as brightness patch (machine-readable-ish)
-        v = self.n % 256
-        d.rectangle([0, self.height - 16, 16, self.height], fill=(v, v, v))
-        self.n += 1
-        return img
-
-
-def encode_jpeg(img, quality=JPEG_QUALITY):
-    import io
-    buf = io.BytesIO()
-    img.save(buf, "JPEG", quality=quality)
-    return buf.getvalue()
-
-
-# ---------------------------------------------------------------- input
-# (unchanged from v1)
-
-_KEYMAP = {
-    "Return": "enter", "BackSpace": "backspace", "Tab": "tab",
-    "Escape": "esc", "space": "space",
-    "Shift_L": "shift", "Shift_R": "shift_r",
-    "Control_L": "ctrl", "Control_R": "ctrl_r",
-    "Alt_L": "alt", "Alt_R": "alt_r",
-    "Super_L": "cmd", "Super_R": "cmd_r",
-    "Up": "up", "Down": "down", "Left": "left", "Right": "right",
-    "Delete": "delete", "Home": "home", "End": "end",
-    "Page_Up": "page_up", "Page_Down": "page_down",
-    "Caps_Lock": "caps_lock",
-}
-for _i in range(1, 13):
-    _KEYMAP["F%d" % _i] = "f%d" % _i
-
-
-class InputInjector:
-    """pynput-based injection. Raises RuntimeError if unavailable."""
-
-    def __init__(self):
-        ensure_vendor()
-        from pynput.mouse import Controller as MouseController, Button
-        from pynput.keyboard import Controller as KeyboardController, Key
-        self._mouse = MouseController()
-        self._kbd = KeyboardController()
-        self._Button = Button
-        self._Key = Key
-        LOG.info("input injection ready (pynput)")
-
-    def _resolve_key(self, name):
-        if len(name) == 1:
-            return name
-        attr = _KEYMAP.get(name, name.lower())
-        return getattr(self._Key, attr, None)
-
-    def handle(self, ev):
-        t = ev.get("t")
-        if t == "move":
-            self._mouse.position = (int(ev["x"]), int(ev["y"]))
-        elif t == "click":
-            btn = {"left": self._Button.left, "right": self._Button.right,
-                   "middle": self._Button.middle}[ev.get("button", "left")]
-            if ev.get("down", True):
-                self._mouse.press(btn)
-            else:
-                self._mouse.release(btn)
-        elif t == "scroll":
-            self._mouse.scroll(int(ev.get("dx", 0)), int(ev.get("dy", 0)))
-        elif t == "key":
-            key = self._resolve_key(ev.get("key", ""))
-            if key is None:
-                LOG.warning("unknown key %r", ev.get("key"))
-                return
-            if ev.get("down", True):
-                self._kbd.press(key)
-            else:
-                self._kbd.release(key)
-        else:
-            LOG.warning("unknown input event %r", t)
-
-
-class TestInputSink:
-    """Accepts (and logs) input events without injecting -- for --self-test."""
-
-    def __init__(self):
-        self.events = []
-
-    def handle(self, ev):
-        self.events.append(ev)
-        LOG.info("self-test input accepted: %s", json.dumps(ev, sort_keys=True))
-
-
-# ---------------------------------------------------------------- pairing
-
-class DeviceStore:
-    """Trusted devices (trust-on-first-use via password). JSON list at path.
-
-    Each entry carries a permissions dict with the seven boolean flags from
-    proto.PERMISSION_FLAGS. New devices default to all-true (preserves the
-    trust-on-first-use behavior); entries written before permissions existed
-    are migrated on load. An in-memory cache (write-through to disk) keeps
-    per-message permission lookups cheap.
-    """
-
-    def __init__(self, path):
-        self.path = path
-        self._lock = threading.Lock()
-        self._devices = None
-
-    def _read_file(self):
-        try:
-            with open(self.path) as f:
-                data = json.load(f)
-            return data.get("devices", []) if isinstance(data, dict) else []
-        except (OSError, ValueError):
-            return []
-
-    def _write_file(self, devices):
-        tmp = self.path + ".tmp"
-        try:
-            d = os.path.dirname(self.path)
-            if d:
-                os.makedirs(d, exist_ok=True)
-            with open(tmp, "w") as f:
-                json.dump({"devices": devices}, f, indent=2)
-            os.chmod(tmp, 0o600)
-            os.replace(tmp, self.path)
-        except OSError as exc:
-            LOG.warning("cannot persist trusted devices: %s", exc)
-
-    @staticmethod
-    def _default_perms():
-        return {f: True for f in proto.PERMISSION_FLAGS}
-
-    def _ensure_perms(self, entry):
-        """Migrate an entry to a full seven-flag boolean permissions dict."""
-        perms = entry.get("permissions")
-        if not isinstance(perms, dict):
-            perms = {}
-        for f in proto.PERMISSION_FLAGS:
-            if not isinstance(perms.get(f), bool):
-                perms[f] = True
-        entry["permissions"] = perms
-
-    def _load_locked(self):
-        if self._devices is None:
-            self._devices = self._read_file()
-            for d in self._devices:
-                self._ensure_perms(d)
-            self._write_file(self._devices)
-
-    def trust(self, device):
-        """Record a device as trusted (idempotent). Returns True if new."""
-        now = datetime.datetime.now(datetime.timezone.utc).isoformat()
-        with self._lock:
-            self._load_locked()
-            for d in self._devices:
-                if d.get("device_id") == device.get("device_id"):
-                    d["last_seen"] = now
-                    d["device_name"] = device.get("device_name", d.get("device_name"))
-                    d["platform"] = device.get("platform", d.get("platform"))
-                    self._ensure_perms(d)
-                    self._write_file(self._devices)
-                    return False
-            self._devices.append({
-                "device_id": device.get("device_id", "unknown"),
-                "device_name": device.get("device_name", "unknown"),
-                "platform": device.get("platform", "unknown"),
-                "first_seen": now,
-                "last_seen": now,
-                "permissions": self._default_perms(),
-            })
-            self._write_file(self._devices)
-            return True
-
-    def set_permissions(self, device_id, perms):
-        """Replace a device's permission flags. Returns False if unknown."""
-        with self._lock:
-            self._load_locked()
-            for d in self._devices:
-                if d.get("device_id") == device_id:
-                    d["permissions"] = {f: bool(perms[f])
-                                        for f in proto.PERMISSION_FLAGS}
-                    self._write_file(self._devices)
-                    return True
-            return False
-
-    def get_permissions(self, device_id):
-        """Current permission flags for a device, or None if unknown."""
-        with self._lock:
-            self._load_locked()
-            for d in self._devices:
-                if d.get("device_id") == device_id:
-                    return dict(d.get("permissions") or self._default_perms())
-            return None
-
-    def list_devices(self):
-        """All trusted devices (copies) with their permissions."""
-        with self._lock:
-            self._load_locked()
-            return [dict(d) for d in self._devices]
+    def __init__(self, msg, rate_limit=False):
+        super().__init__(msg)
+        self.rate_limit = rate_limit
 
 
 class ConnectionLog:
@@ -346,104 +147,19 @@ class ConnectionLog:
                 LOG.warning("cannot write connection log: %s", exc)
 
 
-# ---------------------------------------------------------------- clipboard
-
-class ClipboardSync:
-    """X11 clipboard monitor. Pushes local changes to viewers via the
-    server broadcast; applies received text locally.
-
-    Backends: xclip, xsel, or in-memory (self-test / headless).
-    """
-
-    POLL_INTERVAL = 1.5
-
-    def __init__(self, broadcast, memory=False):
-        self._broadcast = broadcast
-        self._lock = threading.Lock()
-        self._last_remote = None  # text we applied from a viewer (echo guard)
-        self._last_seen = None
-        self._backend = "memory" if memory else self._detect()
-        self._mem = ""
-        if self._backend == "none":
-            LOG.warning("no clipboard backend (xclip/xsel missing); clipboard sync disabled")
-        else:
-            LOG.info("clipboard backend: %s", self._backend)
-
-    @staticmethod
-    def _detect():
-        if shutil.which("xclip"):
-            return "xclip"
-        if shutil.which("xsel"):
-            return "xsel"
-        return "none"
-
-    @property
-    def enabled(self):
-        return self._backend != "none"
-
-    def get(self):
-        try:
-            if self._backend == "memory":
-                return self._mem
-            if self._backend == "xclip":
-                out = subprocess.run(["xclip", "-o", "-selection", "clipboard"],
-                                     capture_output=True, timeout=5)
-            elif self._backend == "xsel":
-                out = subprocess.run(["xsel", "--clipboard", "--output"],
-                                     capture_output=True, timeout=5)
-            else:
-                return None
-            if out.returncode != 0:
-                return None
-            return out.stdout.decode("utf-8", "replace")
-        except (OSError, subprocess.SubprocessError):
-            return None
-
-    def set(self, text):
-        """Apply text received from a viewer (marks it to avoid echo)."""
-        with self._lock:
-            self._last_remote = text
-        try:
-            if self._backend == "memory":
-                self._mem = text
-            elif self._backend == "xclip":
-                subprocess.run(["xclip", "-i", "-selection", "clipboard"],
-                               input=text.encode("utf-8"), timeout=5, check=False)
-            elif self._backend == "xsel":
-                subprocess.run(["xsel", "--clipboard", "--input"],
-                               input=text.encode("utf-8"), timeout=5, check=False)
-        except (OSError, subprocess.SubprocessError) as exc:
-            LOG.warning("clipboard set failed: %s", exc)
-
-    def current_text(self):
-        return self.get()
-
-    def monitor_loop(self, stop):
-        if not self.enabled:
-            return
-        while not stop.is_set():
-            text = self.get()
-            with self._lock:
-                last_remote = self._last_remote
-            # skip echoes of text we applied from a viewer, and no-change polls
-            if text is not None and text != self._last_seen and text != last_remote:
-                self._last_seen = text
-                payload = json.dumps({"text": text}).encode("utf-8")
-                self._broadcast(proto.CLIPBOARD_SET, payload)
-                LOG.debug("clipboard change broadcast (%d chars)", len(text))
-            stop.wait(self.POLL_INTERVAL)
-
-
-# ---------------------------------------------------------------- server
-
 class _ClientSession:
-    """Per-connection state: socket, device info, upload-in-progress."""
+    """Per-connection state."""
 
-    def __init__(self, conn, device):
+    def __init__(self, conn, device, peer_ip):
         self.conn = conn
         self.device = device
+        self.peer_ip = peer_ip
         self.send_lock = threading.Lock()
         self.put_state = None  # {"path","size","received","fh"} during upload
+        self.last_activity = time.monotonic()
+        self.token = None
+        self.audio = None       # AudioCapture while streaming
+        self.audio_stop = None  # threading.Event for the audio pump
 
     def send(self, mtype, payload=b""):
         with self.send_lock:
@@ -457,6 +173,8 @@ class HostServer:
         self.self_test = self_test
         self._sessions = set()
         self._sessions_lock = threading.Lock()
+        self._privacy_on = False
+        self.camera_owner = None  # session currently owning the virtual camera
         if self_test:
             salt = b"selftest-salt-16"  # exactly 16 bytes
             if test_password is None:
@@ -464,6 +182,7 @@ class HostServer:
             self.key = proto.derive_key(test_password, salt)
             self.salt = salt
             self.file_root = os.environ.get("REMOTE_FILE_ROOT") or "/tmp/remote-selftest-files"
+            self.fps = int(os.environ.get("REMOTE_FPS", "15"))
             self.capture = TestPatternCapture()
             self.injector = TestInputSink()
             self.devices = DeviceStore(os.environ.get("REMOTE_TRUSTED_FILE")
@@ -471,12 +190,21 @@ class HostServer:
             self.conn_log = ConnectionLog(os.environ.get("REMOTE_CONN_LOG")
                                           or "/tmp/remote-selftest-connections.log")
             self.clipboard = ClipboardSync(self.broadcast, memory=True)
+            self.policy = Policy(os.environ.get("REMOTE_POLICY_CONF")
+                                 or "/tmp/remote-selftest-policy.conf")
+            self.jlog = JsonLogger(os.environ.get("REMOTE_JLOG")
+                                   or "/tmp/remote-selftest-remote.jsonl")
+            self.pairing = PairingManager(os.environ.get("REMOTE_PAIRING_CODES")
+                                          or "/tmp/remote-selftest-pairing.json")
+            self.host_device_id = get_or_create_device_id(
+                os.environ.get("REMOTE_DEVICE_ID")
+                or "/tmp/remote-selftest-device-id")
             self.monitored_services = ["remote-host", "tailscaled"]
         else:
-            self.salt, self.key, self.file_root, self.monitored_services = \
+            self.salt, self.key, self.file_root, self.monitored_services, self.fps = \
                 load_config(config_path)
             try:
-                self.capture = ScreenCapture()
+                self.capture = make_capture()
             except RuntimeError as exc:
                 raise SystemExit("screen capture unavailable: %s" % exc)
             try:
@@ -487,43 +215,64 @@ class HostServer:
             self.devices = DeviceStore(DEFAULT_TRUSTED)
             self.conn_log = ConnectionLog(DEFAULT_CONN_LOG)
             self.clipboard = ClipboardSync(self.broadcast)
+            self.policy = Policy(DEFAULT_POLICY_CONF)
+            self.jlog = JsonLogger(DEFAULT_JLOG)
+            self.pairing = PairingManager(DEFAULT_PAIRING_PATH)
+            self.host_device_id = get_or_create_device_id(DEFAULT_DEVICE_ID_PATH)
 
+        self.rate_limiter = RateLimiter()
+        self.session_tokens = SessionTokens()
         self.files = FileTransfer(self.file_root)
         LOG.info("file root: %s", self.files.root)
 
-        # v3 services
+        # v3/v4 services
         self.sys_cmd = SysCmdExecutor(
             dry_run=self_test,
             displays_fn=lambda: get_displays(getattr(self.capture, "size", None)),
-            monitored_services=self.monitored_services)
+            monitored_services=self.monitored_services,
+            pause_fn=self._pause_screen)
         self.terminals = TerminalManager()
         self.chat = ChatLog()
+        self.automation = AutomationEngine(os.environ.get("REMOTE_COMMANDS_CONF")
+                                          or DEFAULT_COMMANDS_CONF)
+        self.camera = VirtualCameraManager()
 
         # Modular handler registry: one function per message type.
         # New protocol features register here without touching the loop.
-        self.handlers = {
-            proto.INPUT: self._h_input,
-            proto.PING: self._h_ping,
-            proto.DISCONNECT: self._h_disconnect,
-            proto.CLIPBOARD_SET: self._h_clipboard,
-            proto.FILE_LIST: self._h_file_list,
-            proto.FILE_GET: self._h_file_get,
-            proto.FILE_PUT: self._h_file_put,
-            proto.FILE_DATA: self._h_file_data,
-            proto.FILE_DONE: self._h_file_done,
-            proto.FILE_MKDIR: self._h_file_mkdir,
-            proto.FILE_DELETE: self._h_file_delete,
-            proto.FILE_RENAME: self._h_file_rename,
-            proto.SYSTEM_CMD: self._h_system_cmd,
-            proto.TERMINAL_OPEN: self._h_terminal_open,
-            proto.TERMINAL_DATA: self._h_terminal_data,
-            proto.TERMINAL_CLOSE: self._h_terminal_close,
-            proto.CHAT_MSG: self._h_chat,
-            proto.AGENT_QUERY: self._h_agent_query,
-            proto.DISPLAYS_QUERY: self._h_displays_query,
-            proto.PERMS_SET: self._h_perms_set,
-            proto.PERMS_LIST: self._h_perms_list,
-        }
+        self.plugins = PluginRegistry()
+        R = self.plugins.register
+        R(proto.INPUT, self._h_input, "mouse")  # refined per-event in _perm_check
+        R(proto.PING, self._h_ping)
+        R(proto.DISCONNECT, self._h_disconnect)
+        R(proto.CLIPBOARD_SET, self._h_clipboard, "clipboard")
+        R(proto.FILE_LIST, self._h_file_list, "files")
+        R(proto.FILE_GET, self._h_file_get, "files")
+        R(proto.FILE_PUT, self._h_file_put, "files")
+        R(proto.FILE_DATA, self._h_file_data, "files")
+        R(proto.FILE_DONE, self._h_file_done, "files")
+        R(proto.FILE_MKDIR, self._h_file_mkdir, "files")
+        R(proto.FILE_DELETE, self._h_file_delete, "files")
+        R(proto.FILE_RENAME, self._h_file_rename, "files")
+        R(proto.SYSTEM_CMD, self._h_system_cmd, "system")  # launch-app -> apps
+        R(proto.TERMINAL_OPEN, self._h_terminal_open, "terminal")
+        R(proto.TERMINAL_DATA, self._h_terminal_data, "terminal")
+        R(proto.TERMINAL_CLOSE, self._h_terminal_close, "terminal")
+        R(proto.TERMINAL_RESIZE, self._h_terminal_resize, "terminal")
+        R(proto.CHAT_MSG, self._h_chat)
+        R(proto.AGENT_QUERY, self._h_agent_query)
+        R(proto.DISPLAYS_QUERY, self._h_displays_query)
+        R(proto.PERMS_SET, self._h_perms_set)
+        R(proto.PERMS_LIST, self._h_perms_list)
+        R(proto.AUDIO_START, self._h_audio_start, "audio")
+        R(proto.AUDIO_STOP, self._h_audio_stop, "audio")
+        R(proto.WEBCAM_LIST, self._h_webcam_list, "webcam")
+        R(proto.WEBCAM_FRAME, self._h_webcam_frame, "webcam")
+        R(proto.NET_STATUS, self._h_net_status)
+        R(proto.POLICY_GET, self._h_policy_get)
+        R(proto.EXEC_RUN, self._h_exec_run, "automation")
+        R(proto.CAMERA_START, self._h_camera_start, "camera")
+        R(proto.CAMERA_STOP, self._h_camera_stop, "camera")
+        R(proto.CAMERA_FRAME, self._h_camera_frame, "camera")
 
     # -- session bookkeeping -------------------------------------------------
 
@@ -553,12 +302,38 @@ class HostServer:
     def _unregister(self, session):
         with self._sessions_lock:
             self._sessions.discard(session)
+            remaining = len(self._sessions)
         st = session.put_state
         if st and st.get("fh"):
             try:
                 st["fh"].close()
             except OSError:
                 pass
+        # stop this session's audio stream, if any
+        self._audio_stop_session(session)
+        # tokens die with the connection
+        try:
+            self.session_tokens.revoke(id(session))
+        except Exception:  # noqa: BLE001
+            pass
+        # the virtual camera is released when its owner goes away
+        if self.camera_owner is session:
+            try:
+                self.camera.stop()
+                self.jlog.log("camera", action="stop",
+                              reason="owner disconnected",
+                              device_id=session.device.get("device_id"))
+            except Exception:  # noqa: BLE001
+                pass
+            self.camera_owner = None
+        # privacy mode ends with the last session
+        if remaining == 0 and self._privacy_on:
+            try:
+                set_privacy(False)
+            except Exception:  # noqa: BLE001
+                pass
+            self._privacy_on = False
+            LOG.info("privacy mode off (last client disconnected)")
         # a dropped client must not leave shells running
         try:
             self.terminals.close_for_owner(session)
@@ -573,10 +348,14 @@ class HostServer:
         srv.bind((self.bind, self.port))
         srv.listen(8)
         LOG.info("listening on %s:%d", self.bind or "0.0.0.0", self.port)
+        if sd_notify("READY=1"):
+            LOG.info("sd_notify READY=1 sent")
         stop = threading.Event()
-        clip_thread = threading.Thread(target=self.clipboard.monitor_loop,
-                                       args=(stop,), daemon=True)
-        clip_thread.start()
+        for target, args in ((self.clipboard.monitor_loop, (stop,)),
+                             (_watchdog_loop, (stop,)),
+                             (self._camera_sweep_loop, (stop,))):
+            t = threading.Thread(target=target, args=args, daemon=True)
+            t.start()
         try:
             while True:
                 conn, addr = srv.accept()
@@ -587,62 +366,306 @@ class HostServer:
         finally:
             stop.set()
 
-    def _serve_client(self, conn):
-        device = {"device_id": "unknown", "device_name": "unknown", "platform": "unknown"}
-        try:
+    def _camera_sweep_loop(self, stop):
+        """10s sweep: auto-stop the virtual camera on inactivity."""
+        while not stop.wait(10):
             try:
-                device = proto.server_handshake(conn, self.key, self.salt)
-            except proto.AuthError as exc:
-                LOG.warning("auth failed: %s", exc)
+                if self.camera.check_inactivity():
+                    self.camera_owner = None
+                    self.jlog.log("camera", action="auto-stop",
+                                  reason="inactivity timeout")
+                    LOG.warning("camera auto-stopped (inactivity)")
+            except Exception as exc:  # noqa: BLE001
+                LOG.warning("camera sweep failed: %s", exc)
+
+    # -- pre-auth: device hello, pairing codes, password -----------------------
+
+    def _preauth(self, conn, peer_ip):
+        """v4 pre-auth phase. Returns the device dict on success.
+
+        1. DEVICE_HELLO (1.5s window; silent v1 clients proceed anonymous).
+        2. Optional PAIR_REQUEST (1.5s window): redeem the pairing code;
+           on success the device is trusted (marked paired for this session).
+        3. Pairing policy: when require_pairing is set and the device is
+           neither just-paired nor already trusted -> PAIR_REQUIRED, stop.
+        4. Password challenge-response; AUTH_OK carries PROTOCOL_ID.
+
+        Raises _PreAuthStop for policy denials, proto.AuthError for
+        handshake/password failures.
+        """
+        device = {"device_id": "unknown", "device_name": "unknown",
+                  "platform": "unknown"}
+        conn.settimeout(1.5)
+        try:
+            mtype, payload = proto.recv_msg(conn)
+            if mtype == proto.DEVICE_HELLO:
+                try:
+                    info = json.loads(payload.decode("utf-8"))
+                    for k in ("device_id", "device_name", "platform"):
+                        if info.get(k):
+                            device[k] = str(info[k])[:128]
+                except (ValueError, AttributeError):
+                    pass
+            else:
+                raise proto.AuthError(
+                    "expected DEVICE_HELLO or AUTH silence, got 0x%02x" % mtype)
+        except socket.timeout:
+            pass  # v1 client: silent, proceed without device info
+        except proto.ProtocolError as exc:
+            if "closed" in str(exc):
+                raise proto.AuthError("connection closed before auth: %s" % exc)
+            # any other framing weirdness pre-auth: proceed without device info
+
+        if self.devices.is_blocked(device.get("device_id", "unknown")):
+            raise _PreAuthStop("device is blocked", rate_limit=True)
+
+        # optional pairing-code redemption (PairActivity flow)
+        paired_now = False
+        conn.settimeout(1.5)
+        try:
+            mtype, payload = proto.recv_msg(conn)
+        except socket.timeout:
+            mtype = None
+        except proto.ProtocolError as exc:
+            raise proto.AuthError("connection closed in pairing window: %s" % exc)
+        if mtype is not None:
+            if mtype != proto.PAIR_REQUEST:
+                raise proto.AuthError(
+                    "unexpected message 0x%02x in pairing window" % mtype)
+            try:
+                req = json.loads(payload.decode("utf-8"))
+                code = str(req.get("code", ""))
+                for k in ("device_id", "device_name", "platform"):
+                    if req.get(k):
+                        device[k] = str(req[k])[:128]
+            except (ValueError, AttributeError):
+                code = ""
+            ok, detail = self.pairing.redeem(code)
+            try:
+                proto.send_msg(conn, proto.PAIR_RESULT,
+                               json.dumps({"ok": ok, "detail": detail}).encode("utf-8"))
+            except OSError:
+                pass
+            self.jlog.log("pairing", device_id=device.get("device_id"),
+                          ok=ok, detail=detail, ip=peer_ip)
+            LOG.info("pairing redeem from %s (%s): ok=%s (%s)",
+                     peer_ip, device.get("device_id"), ok, detail)
+            if ok:
+                self.devices.trust(device)  # mark paired
+                paired_now = True
+
+        if (self.policy.check("pairing") and not paired_now
+                and not self.devices.is_trusted(device.get("device_id", "unknown"))):
+            try:
+                proto.send_msg(conn, proto.PAIR_REQUIRED,
+                               json.dumps({"device_id": self.host_device_id}).encode("utf-8"))
+            except OSError:
+                pass
+            raise _PreAuthStop("pairing required for this host")
+
+        # password challenge-response
+        conn.settimeout(15.0)
+        nonce = os.urandom(proto.NONCE_LEN)
+        proto.send_msg(conn, proto.AUTH_REQ, self.salt + nonce)
+        try:
+            mtype, payload = proto.recv_msg(conn)
+        except proto.ProtocolError as exc:
+            raise proto.AuthError("no auth response: %s" % exc)
+        if mtype != proto.AUTH_RESP:
+            raise proto.AuthError("expected AUTH_RESP, got 0x%02x" % mtype)
+        expected = hmac.new(self.key, nonce, hashlib.sha256).digest()
+        if len(payload) != len(expected) or not hmac.compare_digest(payload, expected):
+            raise proto.AuthError("bad password")
+        proto.send_msg(conn, proto.AUTH_OK, proto.PROTOCOL_ID)
+        conn.settimeout(None)
+        device["_paired_now"] = paired_now
+        return device
+
+    def _request_approval(self, device):
+        """Best-effort local approval dialog (60s). tkinter first, zenity
+        fallback. Headless (no DISPLAY, no zenity) -> False: on a headless
+        host only pairing-code sessions get in (documented in README)."""
+        name = device.get("device_name", "unknown")
+        did = device.get("device_id", "unknown")
+        msg = "Allow remote access from %s (%s)?" % (name, did)
+        if not os.environ.get("DISPLAY") and shutil.which("zenity") is None:
+            LOG.warning("approval required for %s but no desktop session: "
+                        "denying (pairing-code mode only)", did)
+            return False
+        try:
+            import tkinter as tk
+            from tkinter import messagebox
+            root = tk.Tk()
+            root.withdraw()
+            answer = [None]
+
+            def ask():
+                try:
+                    answer[0] = messagebox.askyesno("Remote access request",
+                                                    msg, parent=root)
+                except Exception as exc:  # noqa: BLE001
+                    LOG.warning("approval dialog failed: %s", exc)
+                finally:
+                    try:
+                        root.destroy()
+                    except Exception:  # noqa: BLE001
+                        pass
+
+            t = threading.Thread(target=ask, daemon=True)
+            t.start()
+            t.join(60)
+            if answer[0] is not None:
+                return bool(answer[0])
+        except Exception as exc:  # noqa: BLE001 - tkinter unavailable/broken
+            LOG.warning("tkinter approval unavailable: %s", exc)
+        try:
+            r = subprocess.run(["zenity", "--question",
+                                "--title=Remote access request",
+                                "--text=" + msg, "--timeout=60"],
+                               timeout=65)
+            return r.returncode == 0
+        except (OSError, subprocess.SubprocessError) as exc:
+            LOG.warning("zenity approval failed: %s", exc)
+        return False
+
+    def _serve_client(self, conn):
+        peer_ip = "unknown"
+        try:
+            peer_ip = conn.getpeername()[0]
+        except OSError:
+            pass
+        device = {"device_id": "unknown", "device_name": "unknown",
+                  "platform": "unknown"}
+        try:
+            allowed, retry_after = self.rate_limiter.allow(peer_ip)
+            if not allowed:
+                LOG.warning("rate-limited connection from %s (retry in %.0fs)",
+                            peer_ip, retry_after)
+                try:
+                    proto.send_msg(conn, proto.AUTH_FAIL,
+                                   b"too many failed attempts; try again later")
+                except OSError:
+                    pass
+                self.conn_log.log("rate_limited",
+                                  {"device_id": peer_ip, "device_name": peer_ip})
+                return
+            try:
+                device = self._preauth(conn, peer_ip)
+            except _PreAuthStop as exc:
+                if exc.rate_limit:
+                    self.rate_limiter.record_failure(peer_ip)
+                LOG.warning("pre-auth denied for %s: %s", peer_ip, exc)
                 try:
                     proto.send_msg(conn, proto.AUTH_FAIL, str(exc).encode())
                 except OSError:
                     pass
                 self.conn_log.log("auth_fail", device)
+                self.jlog.log("auth", ok=False, reason=str(exc),
+                              device_id=device.get("device_id"), ip=peer_ip)
                 return
+            except proto.AuthError as exc:
+                self.rate_limiter.record_failure(peer_ip)
+                LOG.warning("auth failed for %s: %s", peer_ip, exc)
+                try:
+                    proto.send_msg(conn, proto.AUTH_FAIL, str(exc).encode())
+                except OSError:
+                    pass
+                self.conn_log.log("auth_fail", device)
+                self.jlog.log("auth", ok=False, reason=str(exc),
+                              device_id=device.get("device_id"), ip=peer_ip)
+                return
+            self.rate_limiter.record_success(peer_ip)
+            device_id = device.get("device_id", "unknown")
             self.conn_log.log("connect", device)
+            self.jlog.log("connection", action="connect", device_id=device_id,
+                          device_name=device.get("device_name"), ip=peer_ip)
             # Register the session BEFORE any logging/push I/O: a broadcast
             # (chat, clipboard) sent by another client in this window must
             # reach the new client. _unregister in the finally covers every
             # exit path below.
-            session = _ClientSession(conn, device)
+            session = _ClientSession(conn, device, peer_ip)
             self._register(session)
             try:
                 if self.devices.trust(device):
                     LOG.info("new trusted device: %s (%s)",
-                             device.get("device_id"), device.get("device_name"))
+                             device_id, device.get("device_name"))
                 self.conn_log.log("auth_ok", device)
-                LOG.info("client authenticated: %s", device.get("device_id"))
+                self.jlog.log("auth", ok=True, device_id=device_id,
+                              device_name=device.get("device_name"), ip=peer_ip)
+                LOG.info("client authenticated: %s", device_id)
 
-                # push current clipboard so the viewer syncs on join
+                # session token, issued post AUTH_OK
+                token, expires = self.session_tokens.issue(device_id, id(session))
+                session.token = token
                 try:
-                    cur = self.clipboard.current_text()
-                    if cur:
-                        session.send(proto.CLIPBOARD_SET,
-                                     json.dumps({"text": cur}).encode("utf-8"))
+                    session.send(proto.SESSION_TOKEN,
+                                 json.dumps({"token": token,
+                                             "expires_in": expires}).encode("utf-8"))
                 except OSError:
-                    pass
-                stop = threading.Event()
-                sender = None
-                perms = self.devices.get_permissions(device.get("device_id")) or {}
-                if perms.get("view", True):
-                    sender = threading.Thread(target=self._frame_loop,
-                                              args=(session, stop), daemon=True)
-                    sender.start()
-                else:
-                    LOG.info("device %s has no view permission; no frames sent",
-                             device.get("device_id"))
+                    return
+                rot_stop = threading.Event()
+                rot = threading.Thread(target=self._token_rotator,
+                                       args=(session, rot_stop), daemon=True)
+                rot.start()
                 try:
-                    self._msg_loop(session, stop)
+                    # approval gate (pairing-code sessions bypass: the code
+                    # was the approval)
+                    if self.policy.check("approval") and not device.get("_paired_now"):
+                        if self._request_approval(device):
+                            self.jlog.log("approval", ok=True, device_id=device_id)
+                            LOG.info("session approved for %s", device_id)
+                        else:
+                            self.jlog.log("approval", ok=False, device_id=device_id)
+                            LOG.warning("session denied for %s (no approval)",
+                                        device_id)
+                            return
+                    # privacy mode on first connect
+                    with self._sessions_lock:
+                        first = len(self._sessions) == 1
+                    if first and self.policy.get("hide_on_connect") \
+                            and not self._privacy_on:
+                        if set_privacy(True):
+                            self._privacy_on = True
+                            LOG.info("privacy mode on (hide_on_connect)")
+
+                    # push current clipboard so the viewer syncs on join
+                    try:
+                        cur = self.clipboard.current_payload()
+                        if cur:
+                            session.send(proto.CLIPBOARD_SET,
+                                         json.dumps(cur).encode("utf-8"))
+                    except OSError:
+                        pass
+                    stop = threading.Event()
+                    sender = None
+                    perms = self.devices.get_permissions(device_id) or {}
+                    if perms.get("view", True):
+                        sender = threading.Thread(target=self._frame_loop,
+                                                  args=(session, stop), daemon=True)
+                        sender.start()
+                    else:
+                        LOG.info("device %s has no view permission; no frames sent",
+                                 device_id)
+                    try:
+                        self._msg_loop(session, stop)
+                    finally:
+                        stop.set()
+                        rot_stop.set()
+                        if sender is not None:
+                            sender.join(timeout=5)
                 finally:
-                    stop.set()
-                    if sender is not None:
-                        sender.join(timeout=5)
+                    rot_stop.set()
             finally:
                 self._unregister(session)
                 self.conn_log.log("disconnect", device)
+                self.jlog.log("connection", action="disconnect",
+                              device_id=device.get("device_id"), ip=peer_ip)
         except Exception as exc:  # noqa: BLE001 - one bad client must not kill us
             LOG.warning("client error: %s", exc)
+            try:
+                self.jlog.log("error", detail=str(exc)[:200], ip=peer_ip)
+            except Exception:  # noqa: BLE001
+                pass
         finally:
             try:
                 conn.close()
@@ -650,26 +673,56 @@ class HostServer:
                 pass
         LOG.info("client disconnected")
 
+    def _token_rotator(self, session, stop):
+        """Hourly SESSION_ROTATE for one session."""
+        while not stop.wait(3600):
+            try:
+                token, expires = self.session_tokens.rotate(
+                    session.device.get("device_id", "unknown"), id(session))
+                session.token = token
+                session.send(proto.SESSION_ROTATE,
+                             json.dumps({"token": token,
+                                         "expires_in": expires}).encode("utf-8"))
+                LOG.debug("rotated session token for %s",
+                          session.device.get("device_id"))
+            except OSError:
+                break
+            except Exception as exc:  # noqa: BLE001
+                LOG.warning("token rotation failed: %s", exc)
+                break
+
     def _frame_loop(self, session, stop):
-        interval = 1.0 / FRAME_FPS
+        adaptive = AdaptiveController()
+        # config "fps" (15/30/45/60) selects the starting ladder rung
+        rung = next((i for i, (f, _q) in enumerate(AdaptiveController.LADDER)
+                     if f == self.fps), AdaptiveController.START_RUNG)
+        adaptive._rung = rung  # same codebase; starting point only
         last_hash = None
         try:
             while not stop.is_set():
+                if getattr(self.capture, "paused", False):
+                    stop.wait(0.1)
+                    continue
+                fps, quality = adaptive.current
                 t0 = time.monotonic()
                 try:
-                    frame = encode_jpeg(self.capture.grab())
+                    frame = encode_jpeg(self.capture.grab(), quality)
                 except Exception as exc:  # noqa: BLE001
                     LOG.warning("capture failed: %s", exc)
-                    time.sleep(1)
+                    stop.wait(1.0)
                     continue
                 digest = hashlib.sha256(frame).digest()
                 if digest != last_hash:
+                    t_send = time.monotonic()
                     try:
                         session.send(proto.FRAME, frame)
                     except OSError:
                         break
+                    # measured socket-send latency is the congestion signal
+                    # (pragmatic and real: a slow peer backs up the send)
+                    adaptive.note_rtt((time.monotonic() - t_send) * 1000.0)
                     last_hash = digest
-                wait = interval - (time.monotonic() - t0)
+                wait = 1.0 / fps - (time.monotonic() - t0)
                 if wait > 0:
                     stop.wait(wait)
         finally:
@@ -677,11 +730,23 @@ class HostServer:
 
     def _msg_loop(self, session, stop):
         session.conn.settimeout(60)
+        idle_limit = (self.policy.get("idle_disconnect_min") or 0) * 60
         while not stop.is_set():
             try:
                 mtype, payload = proto.recv_msg(session.conn)
-            except (proto.ProtocolError, socket.timeout):
+            except socket.timeout:
+                # quiet period: enforce the idle-disconnect policy, if any
+                if idle_limit and \
+                        time.monotonic() - session.last_activity > idle_limit:
+                    LOG.info("idle disconnect for %s",
+                             session.device.get("device_id"))
+                    self.jlog.log("connection", action="idle-disconnect",
+                                  device_id=session.device.get("device_id"))
+                    break
+                continue
+            except proto.ProtocolError:
                 break
+            session.last_activity = time.monotonic()
             denied = self._perm_check(session, mtype, payload)
             if denied is not None:
                 op, reason = denied
@@ -693,7 +758,7 @@ class HostServer:
                 except OSError:
                     pass
                 continue
-            handler = self.handlers.get(mtype)
+            handler, _flag = self.plugins.lookup(mtype)
             if handler is None:
                 LOG.warning("unexpected msg 0x%02x", mtype)
                 continue
@@ -711,15 +776,13 @@ class HostServer:
         """Return (op, reason) if the message must be rejected, else None.
 
         On rejection the caller sends PERMS_DENIED and drops the message.
-        Messages with no permission mapping (PING, DISCONNECT, CHAT_MSG,
-        AGENT_QUERY, DISPLAYS_QUERY, PERMS_*, unknown types) are always
-        allowed for authenticated clients.
+        The permission-flag mapping lives in the PluginRegistry; the
+        special cases below refine it (INPUT event granularity, SYSTEM_CMD
+        launch-app -> "apps"), and the policy master switches can disable
+        whole features regardless of per-device flags.
         """
         device_id = session.device.get("device_id", "unknown")
-        perms = self.devices.get_permissions(device_id)
-        if perms is None:
-            perms = {f: True for f in proto.PERMISSION_FLAGS}
-        need = None
+        handler, need = self.plugins.lookup(mtype)
         op = "0x%02x" % mtype
         if mtype == proto.INPUT:
             op = "INPUT"
@@ -727,28 +790,69 @@ class HostServer:
                 t = json.loads(payload.decode("utf-8")).get("t")
             except ValueError:
                 return (op, "malformed input event")
-            if t in ("move", "click", "scroll"):
+            if t in ("move", "click", "scroll", "dblclick", "hscroll", "rel"):
                 need = "mouse"
-            elif t == "key":
+            elif t in ("key", "text"):
                 need = "keyboard"
             else:
                 return (op, "unknown input type %r" % (t,))
-        elif mtype == proto.CLIPBOARD_SET:
-            op, need = "CLIPBOARD_SET", "clipboard"
+        elif mtype == proto.SYSTEM_CMD:
+            op = "SYSTEM_CMD"
+            try:
+                cmd = json.loads(payload.decode("utf-8")).get("cmd") if payload else None
+            except ValueError:
+                cmd = None
+            need = "apps" if cmd == "launch-app" else "system"
         elif mtype in (proto.FILE_LIST, proto.FILE_GET, proto.FILE_DATA,
                        proto.FILE_DONE, proto.FILE_PUT, proto.FILE_MKDIR,
                        proto.FILE_DELETE, proto.FILE_RENAME):
             op, need = "FILE_*", "files"
         elif mtype in (proto.TERMINAL_OPEN, proto.TERMINAL_DATA,
-                       proto.TERMINAL_CLOSE):
+                       proto.TERMINAL_CLOSE, proto.TERMINAL_RESIZE):
             op, need = "TERMINAL_*", "terminal"
-        elif mtype == proto.SYSTEM_CMD:
-            op, need = "SYSTEM_CMD", "system"
-        else:
-            return None  # always allowed
-        if need and not perms.get(need, False):
-            return (op, "permission denied: %s" % need)
+        elif mtype == proto.CLIPBOARD_SET:
+            op, need = "CLIPBOARD_SET", "clipboard"
+        elif mtype in (proto.AUDIO_START, proto.AUDIO_STOP):
+            op, need = "AUDIO_*", "audio"
+        elif mtype in (proto.WEBCAM_LIST, proto.WEBCAM_FRAME):
+            op, need = "WEBCAM_*", "webcam"
+        elif mtype == proto.EXEC_RUN:
+            op, need = "EXEC_RUN", "automation"
+        elif mtype in (proto.CAMERA_START, proto.CAMERA_STOP,
+                       proto.CAMERA_FRAME):
+            op, need = "CAMERA_*", "camera"
+        elif handler is None:
+            return None  # unknown types: allowed through to the warning
+        # policy master switches (fail closed; denial names the policy)
+        policy_feature = None
+        if op == "FILE_*":
+            policy_feature = "files"
+        elif op == "TERMINAL_*":
+            policy_feature = "terminal"
+        elif mtype == proto.CLIPBOARD_SET:
+            policy_feature = "clipboard"
+        elif mtype in (proto.AUDIO_START, proto.AUDIO_STOP):
+            policy_feature = "audio"
+        if policy_feature and not self.policy.check(policy_feature):
+            return (op, "disabled by policy")
+        if need:
+            perms = self.devices.get_permissions(device_id)
+            if perms is None:
+                perms = {f: True for f in proto.PERMISSION_FLAGS}
+            if not perms.get(need, False):
+                return (op, "permission denied: %s" % need)
         return None
+
+    # -- capture pause (SYSTEM_CMD "pause-screen") -----------------------------
+
+    def _pause_screen(self, paused):
+        """pause_fn for SysCmdExecutor: pause/resume frame streaming."""
+        try:
+            self.capture.paused = bool(paused)
+        except Exception as exc:  # noqa: BLE001
+            LOG.warning("pause-screen failed: %s", exc)
+            return
+        LOG.info("screen %s", "paused" if paused else "resumed")
 
     # -- message handlers (one per type) --------------------------------------
 
@@ -769,14 +873,11 @@ class HostServer:
 
     def _h_clipboard(self, session, payload):
         try:
-            text = json.loads(payload.decode("utf-8")).get("text", "")
+            obj = json.loads(payload.decode("utf-8"))
         except ValueError:
             return False
-        if not isinstance(text, str):
-            return False
-        LOG.debug("clipboard from %s (%d chars)",
-                  session.device.get("device_id"), len(text))
-        self.clipboard.set(text)
+        LOG.debug("clipboard from %s", session.device.get("device_id"))
+        self.clipboard.set_from_wire(obj)
         return False
 
     # -- file transfer handlers ------------------------------------------------
@@ -911,7 +1012,7 @@ class HostServer:
             self._file_error(session, "rename", str(exc))
         return False
 
-    # -- v3 handlers ------------------------------------------------------------
+    # -- system / terminal / chat / agent / displays ----------------------------
 
     def _h_system_cmd(self, session, payload):
         try:
@@ -924,6 +1025,8 @@ class HostServer:
         except OSError:
             pass
         LOG.info("system_cmd %s -> ok=%s", resp.get("cmd"), resp.get("ok"))
+        self.jlog.log("command", cmd=resp.get("cmd"), ok=resp.get("ok"),
+                      device_id=session.device.get("device_id"))
         return False
 
     def _h_terminal_open(self, session, payload):
@@ -931,10 +1034,15 @@ class HostServer:
             req = json.loads(payload.decode("utf-8"))
             cols = int(req.get("cols") or 80)
             rows = int(req.get("rows") or 24)
+            shell = req.get("shell")
+            env = req.get("env")
+            if env is not None and not isinstance(env, dict):
+                raise TerminalError("env must be an object")
             sid = self.terminals.open(session.send, owner=session,
-                                      cols=cols, rows=rows)
+                                      cols=cols, rows=rows,
+                                      shell=shell, env=env)
             resp = {"session": sid}
-        except (ValueError, TerminalError) as exc:
+        except (ValueError, TypeError, TerminalError) as exc:
             resp = {"session": 0, "error": str(exc)}
         try:
             session.send(proto.TERMINAL_OPENED, json.dumps(resp).encode("utf-8"))
@@ -958,6 +1066,16 @@ class HostServer:
             self.terminals.close(int(req["session"]))
         except (ValueError, KeyError, TypeError):
             pass
+        return False
+
+    def _h_terminal_resize(self, session, payload):
+        try:
+            req = json.loads(payload.decode("utf-8"))
+            self.terminals.resize(int(req["session"]),
+                                  int(req.get("cols") or 80),
+                                  int(req.get("rows") or 24))
+        except (ValueError, KeyError, TypeError, TerminalError) as exc:
+            LOG.warning("bad terminal resize: %s", exc)
         return False
 
     def _h_chat(self, session, payload):
@@ -986,6 +1104,11 @@ class HostServer:
             services = self.monitored_services
         status = collect_status(services)
         try:
+            status["devtools"] = detect_devtools()
+        except Exception as exc:  # noqa: BLE001 - probes must not break us
+            LOG.warning("devtools probe failed: %s", exc)
+            status["devtools"] = {}
+        try:
             session.send(proto.AGENT_STATUS, json.dumps(status).encode("utf-8"))
         except OSError:
             pass
@@ -999,11 +1122,11 @@ class HostServer:
             pass
         return False
 
-    # -- multi-user / permissions handlers ---------------------------------------
+    # -- multi-user / permissions -------------------------------------------------
 
     @staticmethod
     def _valid_perms(perms):
-        """All seven flags required, all booleans."""
+        """All twelve flags required, all booleans."""
         return (isinstance(perms, dict)
                 and set(perms.keys()) == set(proto.PERMISSION_FLAGS)
                 and all(isinstance(v, bool) for v in perms.values()))
@@ -1022,13 +1145,15 @@ class HostServer:
         elif target == own_id:
             resp["detail"] = "cannot change own permissions"
         elif not self._valid_perms(perms):
-            resp["detail"] = ("permissions must include all seven boolean flags: "
+            resp["detail"] = ("permissions must include all twelve boolean flags: "
                               + ", ".join(proto.PERMISSION_FLAGS))
         elif not self.devices.set_permissions(target, perms):
             resp["detail"] = "unknown device"
         else:
             resp["ok"] = True
             LOG.info("permissions for %s set by %s: %s", target, own_id, perms)
+            self.jlog.log("permission-change", device_id=target,
+                          by=own_id, permissions=perms)
         try:
             session.send(proto.PERMS_RESP, json.dumps(resp).encode("utf-8"))
         except OSError:
@@ -1044,6 +1169,215 @@ class HostServer:
         ]}
         try:
             session.send(proto.PERMS_LIST_RESP, json.dumps(resp).encode("utf-8"))
+        except OSError:
+            pass
+        return False
+
+    # -- v4: remote audio ----------------------------------------------------------
+
+    def _audio_stop_session(self, session):
+        """Stop this session's audio stream, if any. Idempotent."""
+        cap, stop = session.audio, session.audio_stop
+        session.audio, session.audio_stop = None, None
+        if stop is not None:
+            stop.set()
+        if cap is not None:
+            try:
+                cap.stop()
+            except Exception:  # noqa: BLE001
+                pass
+
+    def _h_audio_start(self, session, payload):
+        try:
+            req = json.loads(payload.decode("utf-8")) if payload else {}
+        except ValueError:
+            req = {}
+        source = req.get("source") if isinstance(req, dict) else None
+        # a second AUDIO_START replaces the first (one stream per session)
+        self._audio_stop_session(session)
+        cap = AudioCapture()
+        try:
+            if not source:
+                sources = audio_list_sources()
+                monitors = [s for s in sources if s.get("kind") == "monitor"]
+                pick = monitors or sources
+                if not pick:
+                    raise AudioError("no audio sources on this host")
+                source = pick[0]["id"]
+            cap.start(source)
+        except AudioError as exc:
+            try:
+                session.send(proto.AUDIO_ERROR,
+                             json.dumps({"detail": str(exc)}).encode("utf-8"))
+            except OSError:
+                pass
+            return False
+        stop = threading.Event()
+        session.audio, session.audio_stop = cap, stop
+        t = threading.Thread(target=self._audio_pump,
+                             args=(session, cap, stop), daemon=True)
+        t.start()
+        LOG.info("audio streaming to %s (source %s)",
+                 session.device.get("device_id"), source)
+        return False
+
+    def _audio_pump(self, session, cap, stop):
+        while not stop.is_set():
+            try:
+                chunk = cap.read_chunk()
+            except AudioError as exc:
+                LOG.warning("audio capture error: %s", exc)
+                try:
+                    session.send(proto.AUDIO_ERROR,
+                                 json.dumps({"detail": str(exc)}).encode("utf-8"))
+                except OSError:
+                    pass
+                break
+            try:
+                session.send(proto.AUDIO_DATA, chunk)
+            except OSError:
+                break
+        cap.stop()
+
+    def _h_audio_stop(self, session, payload):
+        self._audio_stop_session(session)
+        return False
+
+    # -- v4: webcam -----------------------------------------------------------------
+
+    def _h_webcam_list(self, session, payload):
+        cams = list_cameras()
+        try:
+            session.send(proto.WEBCAM_LIST,
+                         json.dumps({"cameras": cams}).encode("utf-8"))
+        except OSError:
+            pass
+        return False
+
+    def _h_webcam_frame(self, session, payload):
+        try:
+            req = json.loads(payload.decode("utf-8"))
+            cam_id = req.get("id") if isinstance(req, dict) else None
+        except ValueError:
+            cam_id = None
+        try:
+            jpeg = grab_frame(cam_id)
+        except WebcamError as exc:
+            # documented in PROTOCOL.md: error JSON on the same type; the
+            # client branches on the first bytes (JPEG starts FF D8).
+            body = json.dumps({"error": str(exc)}).encode("utf-8")
+        else:
+            body = jpeg
+        try:
+            session.send(proto.WEBCAM_FRAME, body)
+        except OSError:
+            pass
+        return False
+
+    # -- v4: net status / policy / automation ------------------------------------------
+
+    def _h_net_status(self, session, payload):
+        peer_ip = session.peer_ip
+
+        def work():
+            try:
+                body = net_status_payload(peer_ip=peer_ip)
+                session.send(proto.NET_STATUS,
+                             json.dumps(body).encode("utf-8"))
+            except OSError:
+                pass
+
+        # tailscale ping can take seconds; never stall the message loop
+        threading.Thread(target=work, daemon=True).start()
+        return False
+
+    def _h_policy_get(self, session, payload):
+        try:
+            session.send(proto.POLICY_GET,
+                         json.dumps({"toggles": self.policy.as_dict()}).encode("utf-8"))
+        except OSError:
+            pass
+        return False
+
+    def _h_exec_run(self, session, payload):
+        try:
+            req = json.loads(payload.decode("utf-8"))
+            name = req.get("name") if isinstance(req, dict) else None
+            args = req.get("args") if isinstance(req, dict) else None
+        except ValueError:
+            return False
+        res = self.automation.run(name, args)
+        try:
+            session.send(proto.EXEC_RESULT, json.dumps(res).encode("utf-8"))
+        except OSError:
+            pass
+        return False
+
+    # -- v4: camera for verification -----------------------------------------------------
+
+    def _h_camera_start(self, session, payload):
+        try:
+            req = json.loads(payload.decode("utf-8"))
+            width = int(req.get("width") or 0)
+            height = int(req.get("height") or 0)
+            fps = int(req.get("fps") or 0)
+            facing = req.get("facing")
+            dev = self.camera.start(width, height, fps, facing)
+        except (ValueError, TypeError, AttributeError, CameraError) as exc:
+            err = str(exc)
+            self.jlog.log("camera", action="start", ok=False, error=err,
+                          device_id=session.device.get("device_id"))
+            status = {"active": False, "device": self.camera.device,
+                      "width": 0, "height": 0, "fps": 0, "error": err}
+        else:
+            self.camera_owner = session
+            self.jlog.log("camera", action="start", ok=True, device=dev,
+                          width=width, height=height, fps=fps, facing=facing,
+                          device_id=session.device.get("device_id"))
+            status = self.camera.status_dict()
+        try:
+            session.send(proto.CAMERA_STATUS, json.dumps(status).encode("utf-8"))
+        except OSError:
+            pass
+        return False
+
+    def _h_camera_frame(self, session, payload):
+        if self.camera_owner is not None and self.camera_owner is not session:
+            err = "camera owned by another session"
+        else:
+            try:
+                self.camera.write_frame(payload)
+                return False
+            except CameraError as exc:
+                err = str(exc)
+                if not self.camera.active:
+                    self.camera_owner = None
+        try:
+            status = dict(self.camera.status_dict())
+            status["error"] = err
+            session.send(proto.CAMERA_STATUS, json.dumps(status).encode("utf-8"))
+        except OSError:
+            pass
+        return False
+
+    def _h_camera_stop(self, session, payload):
+        if self.camera_owner is not None and self.camera_owner is not session:
+            # not the owner: report status, never stop someone else's stream
+            try:
+                session.send(proto.CAMERA_STATUS,
+                             json.dumps(self.camera.status_dict()).encode("utf-8"))
+            except OSError:
+                pass
+            return False
+        was_active = self.camera.active
+        self.camera.stop()
+        self.camera_owner = None
+        if was_active:
+            self.jlog.log("camera", action="stop",
+                          device_id=session.device.get("device_id"))
+        try:
+            session.send(proto.CAMERA_STATUS,
+                         json.dumps(self.camera.status_dict()).encode("utf-8"))
         except OSError:
             pass
         return False
