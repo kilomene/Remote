@@ -50,8 +50,12 @@ mkstub remote-set-password      'echo "remote-set-password argv=[$*] pw_env=$([ 
 mkstub curl            'echo "curl $*" >> "$STUB_LOG"
                         case "$*" in *api.github.com*) echo "{\"tag_name\": \"v9.9.9\"}";; esac
                         exit 0'
-# dpkg: -s v4l2loopback-dkms succeeds iff STUB_V4L2=1; -i always "succeeds".
+# dpkg: -s v4l2loopback-dkms succeeds iff STUB_V4L2=1; -i always "succeeds";
+# --compare-versions delegates to the real dpkg (version ordering is real).
 mkstub dpkg            'echo "dpkg $*" >> "$STUB_LOG"
+                        if [ "${1:-}" = "--compare-versions" ]; then
+                          /usr/bin/dpkg --compare-versions "$2" "$3" "$4"; exit $?
+                        fi
                         if [ "${1:-}" = "-s" ] && [ "${2:-}" = "v4l2loopback-dkms" ] \
                            && [ "${STUB_V4L2:-0}" = 1 ]; then
                           echo "Status: install ok installed"; exit 0
@@ -77,7 +81,18 @@ mkstub dpkg-query      'echo "dpkg-query $*" >> "$STUB_LOG"
 
 export PATH="$STUB_BIN:$PATH"
 
-FAKE_DEB="$TMP/fake.deb"; : > "$FAKE_DEB"
+# FAKE_DEB: a real (minimal) .deb with Version 1.0.0 so dpkg-deb -f works.
+FAKE_DEB="$TMP/fake.deb"
+mkdir -p "$TMP/fakedeb/DEBIAN"
+printf 'Package: remote\nVersion: 1.0.0\nArchitecture: all\nMaintainer: test\nDescription: fake\n' \
+    > "$TMP/fakedeb/DEBIAN/control"
+( cd "$TMP/fakedeb/DEBIAN" && tar -czf "$TMP/control.tar.gz" control )
+( cd "$TMP" && tar -czf "$TMP/data.tar.gz" --files-from /dev/null )
+echo "2.0" > "$TMP/debian-binary"
+( cd "$TMP" && ar rcs "$FAKE_DEB" debian-binary control.tar.gz data.tar.gz ) \
+    || { echo "FATAL: cannot build fake deb"; exit 1; }
+/usr/bin/dpkg-deb -f "$FAKE_DEB" Version | grep -q '^1\.0\.0$' \
+    || { echo "FATAL: fake deb has no parseable version"; exit 1; }
 SECRET_KEY="tskey-TESTSECRET-001"
 SECRET_PW="test-password-001"
 
@@ -323,6 +338,19 @@ mkstub curl 'echo "curl $*" >> "$STUB_LOG"
             case "$*" in *api.github.com*) echo "{\"tag_name\": \"v9.9.9\"}";; esac
             exit 0'
 pass "clean failure, no bogus download"
+
+echo "=== [16] older installed version upgrades on a latest run (no --version) ==="
+: > "$STUB_LOG"; rm -f "$TMP/stub_remote_version"
+export STUB_REMOTE_VERSION="0.0.1" STUB_V4L2=1
+export REMOTE_HOST_CONF="$TMP/host.conf"; : > "$REMOTE_HOST_CONF"  # password "set"
+OUT="$TMP/out16.txt"
+TS_AUTHKEY="$SECRET_KEY" bash install.sh --yes --deb "$FAKE_DEB" --no-systemd >"$OUT" 2>&1 \
+    || fail "upgrade run exited non-zero (see $OUT)"
+grep -q "apt-get install -y $FAKE_DEB" "$STUB_LOG" \
+    || fail "older install (0.0.1) was not upgraded to the deb (1.0.0)"
+grep -q "is older than" "$OUT" || fail "expected upgrade log message"
+unset STUB_REMOTE_VERSION STUB_V4L2 REMOTE_HOST_CONF
+pass "older install upgrades; newer install still skips (covered by [3])"
 
 echo
 echo "==============================="
