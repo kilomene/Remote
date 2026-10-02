@@ -381,8 +381,9 @@ ensure_remote_display() {
     have Xvfb || { warn "Xvfb not found, cannot create Remote display"; return 1; }
     log "starting dedicated Xvfb for Remote on $display"
     mkdir -p /var/log/remote 2>/dev/null || true
-    # Run as SERVICE_USER so the host can connect without cookie issues
-    runuser -u "$SERVICE_USER" -- Xvfb "$display" -screen 0 1280x800x24 >/var/log/remote/xvfb.log 2>&1 &
+    # Run as SERVICE_USER so the host can connect without cookie issues.
+    # Use nohup+setsid so it survives the installer exiting.
+    nohup setsid runuser -u "$SERVICE_USER" -- Xvfb "$display" -screen 0 1280x800x24 >/var/log/remote/xvfb.log 2>&1 < /dev/null &
     # Wait for the socket
     for i in $(seq 1 10); do
         [ -S /tmp/.X11-unix/X10 ] && break
