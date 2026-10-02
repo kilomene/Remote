@@ -293,6 +293,54 @@ def start_tailscaled_nosystemd():
           "startup or re-run the wizard)")
 
 
+def kill_stale_tailscaled():
+    """Kill tailscaled processes that aren't serving the socket (best-effort).
+
+    A same-named process can linger after a failed start (seen live: pid
+    38349 with no socket) and block a fresh daemon. Never kills our own
+    process; pgrep -x avoids substring self-matches.
+    """
+    rc, out, _ = run(["pgrep", "-x", "tailscaled"], timeout=15)
+    if rc != 0 or not (out or "").strip():
+        return
+    me = os.getpid()
+    pids = [p for p in out.split() if p.isdigit() and int(p) != me]
+    for sig in (None, "-9"):
+        if not pids:
+            return
+        for p in pids:
+            run(["kill"] + ([sig] if sig else []) + [p], timeout=10)
+        time.sleep(2)
+        rc, out, _ = run(["pgrep", "-x", "tailscaled"], timeout=15)
+        pids = [p for p in (out or "").split()
+                if p.isdigit() and int(p) != me]
+
+
+def ensure_tailscaled_running():
+    """Make sure a tailscaled daemon is answering before `tailscale up`.
+
+    "Binary installed" does not imply "daemon running": a stale/broken
+    tailscaled can linger without a socket (seen live), or the daemon may
+    never have been started (reboot on a non-systemd host).
+    """
+    if tailscaled_responding():
+        return
+    print("  tailscaled not responding — (re)starting the daemon...")
+    kill_stale_tailscaled()
+    if have_systemd():
+        rc, out, err = run(["systemctl", "enable", "--now", "tailscaled"],
+                           timeout=120)
+        if rc != 0:
+            raise WizardError("FAILED [systemctl enable --now tailscaled] "
+                              "(exit %d):\n%s"
+                              % (rc, (err or out).strip()[-2000:]))
+        print("  ok: tailscaled enabled+started via systemd")
+    else:
+        start_tailscaled_nosystemd()
+    if not tailscaled_responding():
+        raise WizardError("tailscaled still not responding after (re)start")
+
+
 def install_tailscale_static():
     """Install Tailscale from the official static binaries. Needs root.
 
@@ -551,6 +599,10 @@ def main():
             install_tailscale()
         else:
             print("step 2/4: already installed, skipping.")
+
+        # the binary being present doesn't mean the daemon answers
+        # (stale process, never started, reboot without systemd)
+        ensure_tailscaled_running()
 
         print("step 3/4: tailscale up...")
         url = tailscale_up(headscale_url=args.headscale, authkey=args.authkey)
