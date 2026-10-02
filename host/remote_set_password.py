@@ -3,6 +3,9 @@
 
 Stores only a salt and a PBKDF2-derived key in /etc/remote/host.conf
 (mode 0600) -- the password itself is never stored.
+
+Non-interactive use: --password, or the REMOTE_PASSWORD environment
+variable (preferred -- never appears in a process listing).
 """
 import argparse
 import base64
@@ -39,10 +42,14 @@ def set_password(password: str, path: str) -> None:
 def main():
     ap = argparse.ArgumentParser(description="set the Remote host password")
     ap.add_argument("--config", default=DEFAULT_CONFIG)
-    ap.add_argument("--password", help="non-interactive (testing only; prefer the prompt)")
+    ap.add_argument("--password", help="non-interactive; also read from the "
+                    "REMOTE_PASSWORD environment variable (preferred: never "
+                    "appears on a command line)")
     args = ap.parse_args()
     if args.password is not None:
         pw = args.password
+    elif os.environ.get("REMOTE_PASSWORD"):
+        pw = os.environ["REMOTE_PASSWORD"]
     else:
         pw1 = getpass.getpass("New Remote password: ")
         pw2 = getpass.getpass("Confirm: ")
