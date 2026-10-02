@@ -17,9 +17,23 @@ public final class BiometricLock {
 
     private BiometricLock() {}
 
-    /** True when the device can offer biometric auth (API 29+). */
+    /** True when the device can actually offer biometric auth: API 29+,
+     *  biometric hardware present, and at least one biometric enrolled.
+     *  Without this check, authenticate() can throw (and crash the app)
+     *  on devices with nothing enrolled. */
     public static boolean isAvailable(Activity activity) {
-        return Build.VERSION.SDK_INT >= 29;
+        if (Build.VERSION.SDK_INT < 29) {
+            return false;
+        }
+        try {
+            android.hardware.biometrics.BiometricManager bm =
+                    activity.getSystemService(
+                            android.hardware.biometrics.BiometricManager.class);
+            return bm != null && bm.canAuthenticate()
+                    == android.hardware.biometrics.BiometricManager.BIOMETRIC_SUCCESS;
+        } catch (Exception e) {
+            return false;
+        }
     }
 
     public interface Callback {
@@ -30,13 +44,19 @@ public final class BiometricLock {
     /**
      * Runs the biometric prompt. Calls back onAuthenticated() on success,
      * onFailed() on error / negative button / no biometrics enrolled.
+     * Never throws: any failure to show the prompt reports onFailed()
+     * instead of crashing the app.
      */
     public static void authenticate(final Activity activity, final Callback cb) {
-        if (Build.VERSION.SDK_INT < 29) {
+        if (!isAvailable(activity)) {
             cb.onFailed();
             return;
         }
-        BiometricPromptHost.prompt(activity, cb);
+        try {
+            BiometricPromptHost.prompt(activity, cb);
+        } catch (Exception e) {
+            cb.onFailed();
+        }
     }
 
     /** True when the user enabled the lock and the device supports it. */
