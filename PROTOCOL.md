@@ -410,23 +410,27 @@ handling each message, violations get `PERMS_DENIED {op, reason}`:
 The user's Android phone has the camera; the Linux host may not. On an
 explicit `CAMERA_START` the phone streams H264 camera frames over the
 encrypted session and the host presents them to Linux apps as a real
-virtual camera (`/dev/video0`) via v4l2loopback. Verification-only:
-consent-gated, never auto-starts, never records, terminates cleanly.
+virtual camera (`/dev/videoN`, dynamically selected — `/dev/video0` is
+never assumed) via v4l2loopback. Verification-only: consent-gated, never
+auto-starts, never records, terminates cleanly.
 
 | Type | Name          | Dir            | Payload |
 |------|---------------|----------------|---------|
-| 0x87 | CAMERA_START  | client → server | UTF-8 JSON `{width, height, fps, facing}` — `facing` is `"front"` or `"rear"` |
+| 0x87 | CAMERA_START  | client → server | UTF-8 JSON `{width, height, fps, facing, rotation?, mirror?, codec?}` — `facing` is `"front"` or `"rear"`; `rotation` is `0`/`90`/`180`/`270` (degrees the host must rotate frames to make them upright); `mirror` is a bool (front cameras usually mirror); `codec` is `"h264"` |
 | 0x88 | CAMERA_STOP   | either          | empty |
-| 0x89 | CAMERA_FRAME  | client → server | raw H264 **Annex-B** bytes — one access unit per message (≤ 8 MiB, the global payload cap) |
-| 0x8A | CAMERA_STATUS | server → client | UTF-8 JSON `{active, device, width, height, fps, error?}` |
+| 0x89 | CAMERA_FRAME  | client → server | raw H264 **Annex-B** bytes — one access unit per message (≤ 8 MiB, the global payload cap). The payload MUST begin with an Annex-B start code; anything else is rejected |
+| 0x8A | CAMERA_STATUS | server → client | UTF-8 JSON `{active, device, width, height, fps, error?}` — `device` is the selected `/dev/videoN`; `width`/`height` are the presented (post-rotation) geometry |
 
-Wire rules for the (future) Android implementer:
+Wire rules for the Android implementer:
 
 - `CAMERA_START` is the ONLY way the camera turns on. There is no
   auto-start on connect, and the host never requests it unprompted.
-- `width`/`height`/`fps` are integers; the host accepts
-  160–3840 × 120–2160 @ 1–60 fps. The host echoes the accepted geometry
-  back in `CAMERA_STATUS`.
+- `width`/`height`/`fps` are integers describing the ENCODED stream
+  geometry; the host accepts 160–3840 × 120–2160 @ 1–60 fps. `rotation`
+  and `mirror` default to `0`/`false` when absent (backward compatible).
+  The host rotates/mirrors in its ffmpeg filter chain
+  (`transpose`/`hflip`) and echoes the accepted presented geometry back
+  in `CAMERA_STATUS`.
 - `CAMERA_FRAME` carries one access unit per message: a complete
   Annex-B NALU sequence (start codes `0x000001` / `0x00000001` between
   NALUs) — typically one IDR or one non-IDR frame's NALUs plus any
@@ -436,13 +440,20 @@ Wire rules for the (future) Android implementer:
   MUST begin with the SPS and PPS NALUs (or carry them prefixing the
   first IDR), and they MUST be re-sent in-band whenever the encoder
   restarts, changes parameters, or at least once every few seconds
-  (the host does not keep decoder state across a reconnect).
+  (the host does not keep decoder state across a reconnect). The
+  Android implementation prepends SPS/PPS to every IDR.
 - The host pipes each payload into
-  `ffmpeg -f h264 -i pipe:0 -pix_fmt yuv420p -s WxH -r FPS -f v4l2 /dev/video0`.
-  Encoded stream parameters must match the `CAMERA_START` geometry or
-  frames will be scaled/cropped by the `-s WxH` filter to that geometry.
+  `ffmpeg -f h264 -i pipe:0 -pix_fmt yuv420p -vf <transpose/hflip/scale> -r FPS -f v4l2 /dev/videoN`.
+  Encoded stream parameters must match the `CAMERA_START` geometry.
+- Device selection: the host first reuses an existing v4l2loopback node
+  carrying the `YourRemote` card label; otherwise it loads v4l2loopback
+  with `video_nr=-1` (the kernel picks a free number) and adopts the new
+  node. On stop it best-effort unloads the module only if it loaded it.
+  At startup the host kills orphaned `ffmpeg ... -f v4l2` writers left by
+  a crashed previous instance, so no stale virtual-camera processes
+  remain.
 - The host emits `CAMERA_STATUS` after every state change: start
-  accepted (`{active: true, device: "/dev/video0", ...}`), start
+  accepted (`{active: true, device: "/dev/videoN", ...}`), start
   rejected or mid-stream failure (`{active: false, error: "..."}`),
   explicit `CAMERA_STOP` (`{active: false, ...}`), and inactivity
   auto-stop (`{active: false, error: "stopped: inactivity timeout"}`).
