@@ -290,6 +290,40 @@ grep -q "Remote host ready" "$OUT_STDOUT" \
     || fail "summary missing from stdout"
 pass "stdout clean; chatter on stderr"
 
+echo "=== [14] latest-tag falls back when the GitHub API is rate-limited ==="
+# Seen live: api.github.com -> 403 on a shared IP. The installer must then
+# follow the /releases/latest redirect on github.com instead of dying.
+: > "$STUB_LOG"; rm -f "$TMP/stub_remote_version"
+mkstub curl 'echo "curl $*" >> "$STUB_LOG"
+            case "$*" in
+              *api.github.com*) exit 22;;
+              *url_effective*) echo "https://github.com/kilomene/Remote/releases/tag/v9.9.9";;
+            esac
+            exit 0'
+OUT="$TMP/out14.txt"
+bash install.sh --yes --dry-run --no-systemd >"$OUT" 2>&1 \
+    || fail "fallback run failed (see $OUT)"
+grep -q "remote_9.9.9_all.deb" "$OUT" || fail "fallback did not resolve v9.9.9"
+pass "API fallback works"
+
+echo "=== [15] total tag-resolution failure dies cleanly (no bogus 404) ==="
+# Seen live: the die inside $(latest_tag) only killed the subshell, so the
+# installer continued with an empty tag and tried //remote__all.deb (404).
+: > "$STUB_LOG"; rm -f "$TMP/stub_remote_version"
+mkstub curl 'echo "curl $*" >> "$STUB_LOG"; exit 22'
+OUT="$TMP/out15.txt"
+bash install.sh --yes --dry-run --no-systemd >"$OUT" 2>&1 \
+    && fail "must fail when tag resolution fails"
+grep -q "could not determine the latest release" "$OUT" \
+    || fail "missing actionable error message"
+grep -q "releases/download//" "$STUB_LOG" \
+    && fail "attempted download with empty tag"
+# restore the default curl stub
+mkstub curl 'echo "curl $*" >> "$STUB_LOG"
+            case "$*" in *api.github.com*) echo "{\"tag_name\": \"v9.9.9\"}";; esac
+            exit 0'
+pass "clean failure, no bogus download"
+
 echo
 echo "==============================="
 echo "ALL INSTALL TESTS PASSED"
