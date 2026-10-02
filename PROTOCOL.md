@@ -24,6 +24,12 @@ Max payload: 8 MiB. Either side must drop the connection on framing errors.
 - **v3** (`AUTH_OK` payload `b"REMOTE/3"`): v2 plus whitelisted system
   commands, pty-backed remote terminal, agent status, display listing,
   session chat, and enforced multi-user permissions (0x80–0x84).
+- **v4** (`AUTH_OK` payload `b"REMOTE/4"`): v3 plus remote audio
+  streaming, webcam frames, Tailscale net status, pairing approval
+  (0x77–0x79), allowlisted automation exec, policy toggles, terminal
+  resize (0x69), session tokens (0x85–0x86), camera for verification
+  (0x87–0x8A), and twelve permission
+  flags.
 
 All v1 message types are byte-identical in v2 and v3. Clients must accept any
 `AUTH_OK` payload starting with `b"REMOTE/"` and enable features based on
@@ -105,12 +111,19 @@ is rejected with `FILE_ERROR {op, reason: "path escapes file root"}`.
 
 | Range     | Reserved for |
 |-----------|--------------|
-| 0x60–0x6E | v3: system commands, terminal, chat, agent status, displays (0x69–0x6E spare) |
+| 0x60–0x6E | v3: system commands, terminal, chat, agent status, displays (0x69 = TERMINAL_RESIZE) |
 | 0x6F      | v3: SYSTEM_RESP |
-| 0x70–0x7F | audio streaming (PLANNED — host loopback capture is the hard part) |
+| 0x70–0x73 | v4: remote audio streaming |
+| 0x74–0x75 | v4: webcam |
+| 0x76–0x79 | v4: net status + pairing |
+| 0x7A–0x7D | v4: automation exec + policy toggles (0x7D spare) |
+| 0x7E–0x7F | reserved |
 | 0x80–0x84 | multi-user / permissions (used, see below) |
-| 0x85–0x8F | reserved (multi-user extensions) |
-| 0x90–0x9F | WebRTC / STUN / TURN |
+| 0x85–0x86 | v4: session tokens (multi-user extension) |
+| 0x87–0x8A | v4: camera for verification |
+| 0x8B–0x8F | reserved (multi-user extensions) |
+| 0x90–0x97 | voice RTX (planned) |
+| 0x98–0x9F | reserved (remainder of the old WebRTC/STUN/TURN block) |
 | 0xC0–0xFE | future |
 | 0xFF      | DISCONNECT (v1, fixed) |
 
@@ -221,6 +234,239 @@ violation gets `PERMS_DENIED {op, reason}` and the message is dropped:
 
 Always allowed for authenticated clients: PING/PONG, DISCONNECT, CHAT_MSG,
 AGENT_QUERY, DISPLAYS_QUERY, PERMS_*.
+
+## v4 (REMOTE/4)
+
+`AUTH_OK` payload is `b"REMOTE/4"`. All v1/v2/v3 types are byte-identical;
+clients still enable features from the version number in the `AUTH_OK`
+payload.
+
+### v4 — terminal resize (0x69, fills the v3 spare slot)
+
+| Type | Name            | Dir            | Payload |
+|------|-----------------|----------------|---------|
+| 0x69 | TERMINAL_RESIZE | client → server | UTF-8 JSON `{session, cols, rows}` |
+
+Asks the host to resize the pty window for the given terminal session
+(session id from `TERMINAL_OPENED`). No response; the next
+`TERMINAL_DATA` reflects the new size.
+
+### v4 — remote audio (0x70–0x73)
+
+| Type | Name        | Dir            | Payload |
+|------|-------------|----------------|---------|
+| 0x70 | AUDIO_START | client → server | UTF-8 JSON `{source}` |
+| 0x71 | AUDIO_DATA  | server → client | raw audio bytes |
+| 0x72 | AUDIO_STOP  | either          | empty |
+| 0x73 | AUDIO_ERROR | server → client | UTF-8 JSON `{detail}` |
+
+Flow: client sends `AUDIO_START {source}` (`source` names the capture
+source the client wants, e.g. the host's audio monitor). The host streams
+`AUDIO_DATA` chunks until either side sends `AUDIO_STOP`. A failure to
+start or a capture error mid-stream gets `AUDIO_ERROR {detail}`. One
+active stream per session; a second `AUDIO_START` replaces the first.
+
+### v4 — webcam (0x74–0x75)
+
+| Type | Name         | Dir            | Payload |
+|------|--------------|----------------|---------|
+| 0x74 | WEBCAM_LIST  | client → server | UTF-8 JSON `{}` |
+| 0x74 | WEBCAM_LIST  | server → client | UTF-8 JSON `{cameras: [{id, name}]}` (same type id; direction distinguishes) |
+| 0x75 | WEBCAM_FRAME | client → server | UTF-8 JSON `{id}` |
+| 0x75 | WEBCAM_FRAME | server → client | JPEG bytes (same type id; direction distinguishes) |
+
+The client discovers cameras with `WEBCAM_LIST` (an empty `id` list means
+no camera is present on the host), then requests single frames with
+`WEBCAM_FRAME {id}`. The server replies with a complete JPEG frame
+(starts `FF D8`, ends `FF D9`), like `FRAME`. Polling is client-driven;
+there is no unsolicited push. A failed capture gets `WEBCAM_FRAME` with a
+UTF-8 JSON `{error}` payload instead — the client branches on the first
+bytes (JPEG starts `FF D8`).
+
+### v4 — Tailscale net status (0x76)
+
+| Type | Name       | Dir            | Payload |
+|------|------------|----------------|---------|
+| 0x76 | NET_STATUS | client → server | UTF-8 JSON `{}` |
+| 0x76 | NET_STATUS | server → client | UTF-8 JSON `{online, tailscale_ip, peer_latency_ms, direct}` (same type id; direction distinguishes) |
+
+Fields:
+
+| Field | Type | Meaning |
+|-------|------|---------|
+| online | bool | host can reach the Tailscale network |
+| tailscale_ip | string | host's Tailscale IPv4 (e.g. `"100.80.146.11"`), or `""` when offline |
+| peer_latency_ms | number | measured RTT to this viewer, or `-1` if unknown |
+| direct | bool | true when the path is direct peer-to-peer (not relayed) |
+
+### v4 — pairing approval (0x77–0x79)
+
+| Type | Name          | Dir            | Payload |
+|------|---------------|----------------|---------|
+| 0x77 | PAIR_REQUEST  | client → server | UTF-8 JSON `{code, device_id, device_name, platform}` |
+| 0x78 | PAIR_RESULT   | server → client | UTF-8 JSON `{ok, detail?}` |
+| 0x79 | PAIR_REQUIRED | server → client | UTF-8 JSON `{device_id}` |
+
+All three are sent **pre-auth**, after `DEVICE_HELLO` and before the
+auth challenge/response. Codes are single-use, issued out-of-band by the
+host owner (shown on the host or encoded in a QR PNG).
+
+Pairing flow:
+
+1. Client sends `DEVICE_HELLO`, then `PAIR_REQUEST` with the pairing
+   code and its device identity.
+2. Host validates the code and replies `PAIR_RESULT {ok: true}`; the
+   device is recorded in the trust store. On failure the host replies
+   `{ok: false, detail: "..."}` and closes the connection.
+3. The normal auth handshake follows (`AUTH_REQ` / `AUTH_RESP` /
+   `AUTH_OK`).
+
+When host policy `require_pairing` is true and an **unknown** device
+connects without a valid `PAIR_REQUEST`, the host answers
+`PAIR_REQUIRED {device_id}` instead of `AUTH_REQ` — `device_id` is the
+*host's* `YR-XXXX-XXXX` id, so the client can show which machine demands
+pairing. The client must surface a pairing prompt; no auth challenge is
+issued until pairing completes. Known/trusted devices are unaffected.
+
+### v4 — automation exec (0x7A–0x7B)
+
+| Type | Name        | Dir            | Payload |
+|------|-------------|----------------|---------|
+| 0x7A | EXEC_RUN    | client → server | UTF-8 JSON `{name, args: []}` |
+| 0x7B | EXEC_RESULT | server → client | UTF-8 JSON `{name, ok, output, error?}` |
+
+`name` selects a command from the host's strict allowlist registry —
+never a raw shell. `args` is an array of strings passed to the
+allowlisted command. The host replies `EXEC_RESULT` with `ok: true` and
+`output` (UTF-8, possibly truncated), or `ok: false` with `error?`
+(e.g. `"not allowed"`, `"failed: <reason>"`).
+
+### v4 — privacy policy toggles (0x7C)
+
+| Type | Name       | Dir            | Payload |
+|------|------------|----------------|---------|
+| 0x7C | POLICY_GET | client → server | UTF-8 JSON `{}` |
+| 0x7C | POLICY_GET | server → client | UTF-8 JSON `{toggles}` (same type id; direction distinguishes) |
+
+`toggles` is an object mapping policy toggle names to booleans, mirroring
+the host's privacy policy (`policy.conf`). Viewers use it to gray out
+features the host has disabled. `0x7D` is spare in the v4 policy block.
+
+### v4 — session tokens (0x85–0x86)
+
+| Type | Name           | Dir            | Payload |
+|------|---------------|----------------|---------|
+| 0x85 | SESSION_TOKEN  | server → client | UTF-8 JSON `{token, expires_in}` |
+| 0x86 | SESSION_ROTATE | server → client | UTF-8 JSON `{token, expires_in}` |
+
+Lifecycle:
+
+- Issued once, immediately after `AUTH_OK`, as `SESSION_TOKEN`
+  `{token: <opaque string>, expires_in: <seconds>}`.
+- Rotated hourly: the host sends `SESSION_ROTATE` with a fresh token;
+  the previous token expires at once.
+- Design decision: tokens are **single-connection nonces**. They are
+  informational and bound to the TCP connection they were issued on —
+  **replaying a token on a new connection is rejected** (the host's
+  trust store maps each token to its originating connection). A
+  reconnecting client completes the full auth handshake and receives a
+  new token.
+- The host never accepts a token as a substitute for auth.
+
+### v4 — clipboard images (0x40, extended)
+
+`CLIPBOARD_SET` is no longer text-only. The payload is UTF-8 JSON
+`{text}` (unchanged from v2) **or** `{mime, data}` for images:
+
+| Field | Meaning |
+|-------|---------|
+| mime | image MIME type, e.g. `"image/png"` |
+| data | base64-encoded image bytes |
+
+Both sides keep the v2 echo-suppression rule (ignore a change that
+matches the last text or image it sent or received).
+
+### v4 — permission flags (12 total)
+
+Every trusted device now carries twelve permission flags (booleans):
+
+`view, mouse, keyboard, clipboard, files, terminal, system,`
+`audio, webcam, apps, automation, camera`
+
+The v3 rules still apply (`PERMS_SET` requires all flags as booleans, a
+device cannot change its own permissions, changes apply to live sessions
+immediately). New v4 enforcement rows — fail-closed, checked before
+handling each message, violations get `PERMS_DENIED {op, reason}`:
+
+| Message | Required flag |
+|---------|---------------|
+| AUDIO_* | `audio` |
+| WEBCAM_* | `webcam` |
+| EXEC_* | `automation` |
+| CAMERA_* | `camera` |
+
+### v4 — camera for verification (0x87–0x8A)
+
+The user's Android phone has the camera; the Linux host may not. On an
+explicit `CAMERA_START` the phone streams H264 camera frames over the
+encrypted session and the host presents them to Linux apps as a real
+virtual camera (`/dev/video0`) via v4l2loopback. Verification-only:
+consent-gated, never auto-starts, never records, terminates cleanly.
+
+| Type | Name          | Dir            | Payload |
+|------|---------------|----------------|---------|
+| 0x87 | CAMERA_START  | client → server | UTF-8 JSON `{width, height, fps, facing}` — `facing` is `"front"` or `"rear"` |
+| 0x88 | CAMERA_STOP   | either          | empty |
+| 0x89 | CAMERA_FRAME  | client → server | raw H264 **Annex-B** bytes — one access unit per message (≤ 8 MiB, the global payload cap) |
+| 0x8A | CAMERA_STATUS | server → client | UTF-8 JSON `{active, device, width, height, fps, error?}` |
+
+Wire rules for the (future) Android implementer:
+
+- `CAMERA_START` is the ONLY way the camera turns on. There is no
+  auto-start on connect, and the host never requests it unprompted.
+- `width`/`height`/`fps` are integers; the host accepts
+  160–3840 × 120–2160 @ 1–60 fps. The host echoes the accepted geometry
+  back in `CAMERA_STATUS`.
+- `CAMERA_FRAME` carries one access unit per message: a complete
+  Annex-B NALU sequence (start codes `0x000001` / `0x00000001` between
+  NALUs) — typically one IDR or one non-IDR frame's NALUs plus any
+  prefix SEI/SPS/PPS. Do NOT split an access unit across messages and do
+  NOT bundle multiple access units into one message.
+- **SPS/PPS in-band**: the first `CAMERA_FRAME` after `CAMERA_START`
+  MUST begin with the SPS and PPS NALUs (or carry them prefixing the
+  first IDR), and they MUST be re-sent in-band whenever the encoder
+  restarts, changes parameters, or at least once every few seconds
+  (the host does not keep decoder state across a reconnect).
+- The host pipes each payload into
+  `ffmpeg -f h264 -i pipe:0 -pix_fmt yuv420p -s WxH -r FPS -f v4l2 /dev/video0`.
+  Encoded stream parameters must match the `CAMERA_START` geometry or
+  frames will be scaled/cropped by the `-s WxH` filter to that geometry.
+- The host emits `CAMERA_STATUS` after every state change: start
+  accepted (`{active: true, device: "/dev/video0", ...}`), start
+  rejected or mid-stream failure (`{active: false, error: "..."}`),
+  explicit `CAMERA_STOP` (`{active: false, ...}`), and inactivity
+  auto-stop (`{active: false, error: "stopped: inactivity timeout"}`).
+  `error` is present only when something failed.
+- The host requires the `camera` permission flag (fail-closed, checked
+  before handling any `CAMERA_*` message; violations get
+  `PERMS_DENIED {op: "CAMERA_START", reason: "..."}` and the message is
+  dropped). Only ONE camera session is active per host: a second
+  `CAMERA_START` while active is answered with
+  `CAMERA_STATUS {active: false, error: "camera already in use"}`.
+- Inactivity: if no `CAMERA_FRAME` arrives for 60 s the host auto-stops
+  and releases `/dev/video0` immediately — the client does not need to
+  send `CAMERA_STOP` on pause, but SHOULD send it when the user
+  explicitly ends verification so the device releases without delay.
+- The client MAY send `CAMERA_STOP` at any time; the host also sends
+  `CAMERA_STOP` semantics via `CAMERA_STATUS {active: false}` if it
+  tears the session down itself (e.g. on disconnect the host releases
+  the device without waiting for a stop message).
+| SYSTEM_CMD `open-app` (app launching) | `apps` |
+| SYSTEM_CMD (all others) | `system` |
+
+Always allowed for authenticated clients: PING/PONG, DISCONNECT,
+CHAT_MSG, AGENT_QUERY, DISPLAYS_QUERY, NET_STATUS, POLICY_GET,
+PERMS_*, SESSION_*.
 
 ## Authentication
 
