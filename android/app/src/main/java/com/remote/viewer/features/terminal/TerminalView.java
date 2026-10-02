@@ -99,6 +99,75 @@ public class TerminalView extends View {
     public int getCols() { return cols; }
     public int getRows() { return rows; }
 
+    /** Grid size listener: fired when the fitted grid changes (e.g. rotation). */
+    public interface OnGridSizeListener {
+        void onGridSize(int cols, int rows);
+    }
+
+    private OnGridSizeListener gridListener;
+
+    public void setOnGridSizeListener(OnGridSizeListener l) { gridListener = l; }
+
+    /**
+     * Computes the grid that fits the current view size at the current font.
+     * Returns {cols, rows}, clamped to sane minimums. Call after layout.
+     */
+    public int[] fitGrid() {
+        float w = getWidth();
+        float h = getHeight();
+        float cw = charW > 0 ? charW : paint.measureText("M");
+        Paint.FontMetrics fm = paint.getFontMetrics();
+        float ch = fm.descent - fm.top;
+        if (ch <= 0) ch = 20;
+        int c = w > 0 && cw > 0 ? (int) (w / cw) : 80;
+        int r = h > 0 && ch > 0 ? (int) (h / ch) : 24;
+        return new int[]{Math.max(20, c), Math.max(8, r)};
+    }
+
+    /**
+     * Resizes the grid, preserving existing content where it fits.
+     * Cursor is clamped into the new grid.
+     */
+    public synchronized void resizeGrid(int newCols, int newRows) {
+        newCols = Math.max(20, newCols);
+        newRows = Math.max(8, newRows);
+        if (newCols == cols && newRows == rows) return;
+        List<Line> oldLines = new ArrayList<Line>(lines);
+        int oldCols = cols;
+        cols = newCols;
+        rows = newRows;
+        lines.clear();
+        for (int i = 0; i < rows; i++) {
+            Line ln = new Line(cols);
+            if (i < oldLines.size()) {
+                Line old = oldLines.get(i);
+                int n = Math.min(oldCols, cols);
+                for (int j = 0; j < n; j++) {
+                    ln.cells[j].ch = old.cells[j].ch;
+                    ln.cells[j].fg = old.cells[j].fg;
+                    ln.cells[j].bold = old.cells[j].bold;
+                }
+            }
+            lines.add(ln);
+        }
+        cursorRow = Math.max(0, Math.min(rows - 1, cursorRow));
+        cursorCol = Math.max(0, Math.min(cols - 1, cursorCol));
+        scrollOffset = 0;
+        postInvalidate();
+    }
+
+    @Override
+    protected void onSizeChanged(int w, int h, int oldw, int oldh) {
+        super.onSizeChanged(w, h, oldw, oldh);
+        if (w == oldw && h == oldh) return;
+        int[] fit = fitGrid();
+        if (fit[0] != cols || fit[1] != rows) {
+            resizeGrid(fit[0], fit[1]);
+            OnGridSizeListener l = gridListener;
+            if (l != null) l.onGridSize(cols, rows);
+        }
+    }
+
     /** Appends raw pty output; parses a useful ANSI subset. */
     public synchronized void append(byte[] data) {
         if (data == null) return;
