@@ -230,7 +230,7 @@
     <string name="sec_timeout">Session timeout</string>
     <string name="sec_timeout_mins">%1$d min</string>
     <string name="sec_timeout_off">Off</string>
-    <!-- pairing -->
+    <!-- pairing (only shown when a host's policy actually requires it) -->
     <string name="pair_title">Pair new device</string>
     <string name="pair_sub">Enter the 6-digit code shown on the host to trust this device. Pairing happens before sign-in — you\'ll still enter the host password to connect.</string>
     <string name="pair_code">Pairing code</string>
@@ -238,10 +238,8 @@
     <string name="pair_device">Device name</string>
     <string name="pair_button">Pair</string>
     <string name="pair_working">Pairing…</string>
-    <string name="pair_need_host">Enter the host address and password first.</string>
-    <string name="pair_bad_code">Enter the 6-digit code from the host.</string>
-    <string name="pair_legacy">This host doesn\'t support pairing codes yet (it needs the v4 host).</string>
-    <string name="pair_paired">Paired — connecting…</string>
+    <string name="pair_required_title">Pairing required</string>
+    <string name="pair_required_msg">This host requires pairing before sign-in. On the host run: sudo yourremote-pair-code \"My Phone\", then enter the 6-digit code here.</string>
     <!-- camera for verification -->
     <string name="cam_title">Camera for Verification</string>
     <string name="cam_explain">Your phone becomes this Linux machine\'s camera for verification. The camera starts only when you tap Start, shows a persistent indicator while active, and nothing is recorded. The Linux side cannot turn your camera on.</string>
