@@ -17,7 +17,7 @@ password challenge-response handshake, then serves the session:
   * remote audio (PulseAudio/PipeWire, Opus or PCM1 wire format)
   * webcam single-frame capture
   * Tailscale net status, privacy policy toggles, automation exec
-  * camera-for-verification: phone H264 -> /dev/video0 via v4l2loopback
+  * camera-for-verification: phone H264 -> /dev/videoN via v4l2loopback
 
 Message dispatch goes through host/plugins.py (PluginRegistry).
 """
@@ -30,6 +30,7 @@ import json
 import logging
 import os
 import shutil
+import signal
 import socket
 import subprocess
 import sys
@@ -347,6 +348,7 @@ class HostServer:
         srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         srv.bind((self.bind, self.port))
         srv.listen(8)
+        self._sweep_stale_camera_writers()
         LOG.info("listening on %s:%d", self.bind or "0.0.0.0", self.port)
         if sd_notify("READY=1"):
             LOG.info("sd_notify READY=1 sent")
@@ -377,6 +379,47 @@ class HostServer:
                     LOG.warning("camera auto-stopped (inactivity)")
             except Exception as exc:  # noqa: BLE001
                 LOG.warning("camera sweep failed: %s", exc)
+
+    def _sweep_stale_camera_writers(self):
+        """Kill orphaned ffmpeg v4l2 writers left by a crashed host.
+
+        A previous remote-host process that died without stop() leaves its
+        ffmpeg child writing to a v4l2loopback device nobody reads. Match
+        our exact writer signature (ffmpeg reading H264 from pipe:0 and
+        writing to v4l2) and SIGTERM it. Best-effort; never raises.
+        """
+        if not os.path.isdir("/proc"):
+            return
+        me = os.getpid()
+        killed = 0
+        for pid in filter(str.isdigit, os.listdir("/proc")):
+            if int(pid) == me:
+                continue
+            try:
+                with open("/proc/%s/cmdline" % pid, "rb") as f:
+                    parts = f.read().split(b"\0")
+            except OSError:
+                continue
+            if not parts or not parts[0]:
+                continue
+            try:
+                exe = os.path.basename(parts[0].decode("utf-8", "replace"))
+            except ValueError:
+                continue
+            if (exe == "ffmpeg" and b"pipe:0" in parts and b"v4l2" in parts
+                    and b"-f" in parts and b"h264" in parts):
+                try:
+                    os.kill(int(pid), signal.SIGTERM)
+                    killed += 1
+                    LOG.warning("camera: killed stale ffmpeg v4l2 writer pid %s "
+                                "(orphaned by a previous host process)", pid)
+                except (OSError, ValueError):
+                    pass
+        if killed:
+            try:
+                self.jlog.log("camera", action="stale-sweep", killed=killed)
+            except Exception:  # noqa: BLE001
+                pass
 
     # -- pre-auth: device hello, pairing codes, password -----------------------
 
@@ -1322,17 +1365,21 @@ class HostServer:
             height = int(req.get("height") or 0)
             fps = int(req.get("fps") or 0)
             facing = req.get("facing")
-            dev = self.camera.start(width, height, fps, facing)
+            rotation = int(req.get("rotation") or 0)
+            mirror = bool(req.get("mirror"))
+            dev = self.camera.start(width, height, fps, facing,
+                                    rotation=rotation, mirror=mirror)
         except (ValueError, TypeError, AttributeError, CameraError) as exc:
             err = str(exc)
             self.jlog.log("camera", action="start", ok=False, error=err,
                           device_id=session.device.get("device_id"))
-            status = {"active": False, "device": self.camera.device,
+            status = {"active": False, "device": self.camera.device or "",
                       "width": 0, "height": 0, "fps": 0, "error": err}
         else:
             self.camera_owner = session
             self.jlog.log("camera", action="start", ok=True, device=dev,
                           width=width, height=height, fps=fps, facing=facing,
+                          rotation=rotation, mirror=mirror,
                           device_id=session.device.get("device_id"))
             status = self.camera.status_dict()
         try:
