@@ -89,6 +89,35 @@
             android:fontFamily="sans-serif-medium" />
     </LinearLayout>
 
+    <!-- camera-for-verification indicator: persistent while streaming -->
+    <LinearLayout
+        android:id="@+id/cam_indicator"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="top|start"
+        android:layout_marginStart="12dp"
+        android:layout_marginTop="64dp"
+        android:orientation="horizontal"
+        android:gravity="center_vertical"
+        android:background="@drawable/bg_toolbar"
+        android:padding="8dp"
+        android:visibility="gone">
+
+        <View
+            android:layout_width="10dp"
+            android:layout_height="10dp"
+            android:background="@drawable/bg_rec_dot" />
+
+        <TextView
+            android:id="@+id/cam_status_text"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="8dp"
+            android:textColor="@color/text"
+            android:textSize="12sp"
+            android:fontFamily="sans-serif-medium" />
+    </LinearLayout>
+
     <!-- mouse-mode L/R buttons -->
     <LinearLayout
         android:id="@+id/mouse_bar"
