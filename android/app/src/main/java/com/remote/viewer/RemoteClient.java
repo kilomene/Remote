@@ -262,6 +262,17 @@ public class RemoteClient {
         }
     }
 
+    public void sendTerminalResize(String session, int cols, int rows) {
+        try {
+            JSONObject o = new JSONObject();
+            o.put("session", session);
+            o.put("cols", cols);
+            o.put("rows", rows);
+            send(RemoteProto.TERMINAL_RESIZE, o.toString().getBytes(UTF8));
+        } catch (JSONException ignored) {
+        }
+    }
+
     public void sendTerminalData(String session, byte[] data) {
         try {
             JSONObject o = new JSONObject();
