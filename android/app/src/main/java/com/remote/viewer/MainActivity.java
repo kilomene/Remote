@@ -10,6 +10,7 @@ import android.text.InputType;
 import android.view.LayoutInflater;
 import android.view.View;
 import android.widget.ArrayAdapter;
+import android.widget.Button;
 import android.widget.EditText;
 import android.widget.ImageButton;
 import android.widget.ImageView;
@@ -78,6 +79,10 @@ public class MainActivity extends Activity {
         ImageButton btnHistory = findViewById(R.id.btn_history);
         btnHistory.setOnClickListener(v ->
                 startActivity(new Intent(this, SessionHistoryActivity.class)));
+
+        Button btnPair = findViewById(R.id.btn_pair);
+        btnPair.setOnClickListener(v ->
+                startActivity(new Intent(this, PairActivity.class)));
     }
 
     @Override
