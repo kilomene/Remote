@@ -65,5 +65,10 @@
             android:name=".UserManagementActivity"
             android:exported="false"
             android:screenOrientation="portrait" />
+
+        <activity
+            android:name=".PairActivity"
+            android:exported="false"
+            android:screenOrientation="portrait" />
     </application>
 </manifest>
