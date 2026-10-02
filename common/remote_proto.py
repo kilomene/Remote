@@ -112,15 +112,25 @@ SESSION_TOKEN = 0x85   # s->c: UTF-8 JSON {token, expires_in}, issued post-AUTH_
 SESSION_ROTATE = 0x86  # s->c: UTF-8 JSON {token, expires_in}, hourly rotation
 # camera for verification (0x87-0x8A; consumes the head of the old
 # 0x87-0x8F multi-user-extension reserve). See PROTOCOL.md and
-# host/camera_virtual.py. The Android capture side ships later; the host
-# side presents the phone's H264 camera stream as /dev/video0 via
-# v4l2loopback. Consent-gated, fail-closed under the "camera" permission.
-CAMERA_START = 0x87    # c->s: UTF-8 JSON {width, height, fps, facing:"front"|"rear"}
+# host/camera_virtual.py. The Android capture side streams the phone's
+# H264 camera over the authenticated session; the host presents it as a
+# real /dev/videoN via v4l2loopback. Consent-gated, fail-closed under
+# the "camera" permission.
+CAMERA_START = 0x87    # c->s: UTF-8 JSON {width, height, fps, facing:"front"|"rear",
+                       #   rotation?:0|90|180|270, mirror?:bool, codec?:"h264"}.
+                       #   width/height/fps = ENCODED stream geometry; rotation/
+                       #   mirror describe how the phone is held (front cameras
+                       #   usually mirror). The host rotates/mirrors in its
+                       #   ffmpeg filter chain and reports the PRESENTED
+                       #   geometry in CAMERA_STATUS.
 CAMERA_STOP = 0x88     # either: empty
 CAMERA_FRAME = 0x89   # c->s: raw H264 Annex-B bytes, one access unit per
-                      #   message (<= 8 MiB, the global MAX_PAYLOAD cap)
+                      #   message (<= 8 MiB, the global MAX_PAYLOAD cap).
+                      #   Must start with an Annex-B start code; the first
+                      #   access unit MUST be SPS/PPS-prefixed IDR.
 CAMERA_STATUS = 0x8A  # s->c: UTF-8 JSON {active, device, width, height,
-                      #   fps, error?}
+                      #   fps, error?} -- device is the selected /dev/videoN,
+                      #   width/height the presented (post-rotation) geometry.
 
 # Reserved ranges (see PROTOCOL.md): 0x60-0x6E v3 block (0x69 = TERMINAL_RESIZE),
 # 0x6F v3 SYSTEM_RESP, 0x70-0x7F v4: audio (0x70-0x73), webcam (0x74-0x75),
