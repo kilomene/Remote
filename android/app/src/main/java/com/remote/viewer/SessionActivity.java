@@ -79,7 +79,6 @@ public class SessionActivity extends Activity
 
     private StreamView streamView;
     private TextView stats;
-    private TextView adaptiveBadge;
     private LinearLayout statusOverlay;
     private TextView statusText;
     private Button btnStopReconnect;
@@ -87,7 +86,8 @@ public class SessionActivity extends Activity
     private HorizontalScrollView toolbarScroll;
     private HorizontalScrollView keybarScroll;
     private LinearLayout keybar;
-    private LinearLayout mouseBar;
+    private Button mouseLeftBtn;
+    private Button mouseRightBtn;
     private ImageButton btnExitFs;
 
     // drawers
@@ -165,9 +165,6 @@ public class SessionActivity extends Activity
     private int rttCount;
     private int rttGoodStreak;
     private boolean adaptiveReduced;
-    // Badge shows once per session, quietly. The quality still adapts on
-    // later latency spikes, but the banner never pops again.
-    private boolean adaptiveBadgeShown;
 
     // session timeout
     private final Runnable timeoutFire = new Runnable() {
@@ -210,7 +207,6 @@ public class SessionActivity extends Activity
 
         streamView = findViewById(R.id.stream_view);
         stats = findViewById(R.id.stats);
-        adaptiveBadge = findViewById(R.id.adaptive_badge);
         statusOverlay = findViewById(R.id.status_overlay);
         statusText = findViewById(R.id.status_text);
         btnStopReconnect = findViewById(R.id.btn_stop_reconnect);
@@ -218,7 +214,6 @@ public class SessionActivity extends Activity
         toolbarScroll = findViewById(R.id.toolbar_scroll);
         keybarScroll = findViewById(R.id.keybar_scroll);
         keybar = findViewById(R.id.keybar);
-        mouseBar = findViewById(R.id.mouse_bar);
         recIndicator = findViewById(R.id.rec_indicator);
         recTime = findViewById(R.id.rec_time);
         camIndicator = findViewById(R.id.cam_indicator);
@@ -277,8 +272,11 @@ public class SessionActivity extends Activity
             Toast.makeText(this, R.string.clip_sent, Toast.LENGTH_SHORT).show();
         });
 
-        findViewById(R.id.mouse_left).setOnClickListener(v -> streamView.clickAtCursor(false));
-        findViewById(R.id.mouse_right).setOnClickListener(v -> streamView.clickAtCursor(true));
+        // L/R mouse buttons live in the top toolbar, never over the stream.
+        mouseLeftBtn = mouseBtn(getString(R.string.mouse_left),
+                v -> streamView.clickAtCursor(false));
+        mouseRightBtn = mouseBtn(getString(R.string.mouse_right),
+                v -> streamView.clickAtCursor(true));
 
         btnStopReconnect.setOnClickListener(v -> disconnectAndFinish());
 
@@ -344,6 +342,7 @@ public class SessionActivity extends Activity
                     ? R.string.scale_fit : R.string.scale_original,
                     Toast.LENGTH_SHORT).show();
         });
+        toolBtn(R.drawable.ic_fit, "reset zoom", v -> streamView.resetZoom());
         toolBtn(R.drawable.ic_fullscreen, "fullscreen", v -> setFullscreen(!fullscreen));
         toolBtn(R.drawable.ic_rotate, "orientation", v -> cycleOrientation());
         toolBtn(R.drawable.ic_display, "displays", v -> showDisplaysPopup(v));
@@ -434,9 +433,29 @@ public class SessionActivity extends Activity
         menu.show();
     }
 
+    private Button mouseBtn(String text, View.OnClickListener l) {
+        Button b = new Button(this);
+        b.setText(text);
+        b.setAllCaps(false);
+        b.setTextSize(14);
+        int d = (int) getResources().getDisplayMetrics().density;
+        LinearLayout.LayoutParams lp =
+                new LinearLayout.LayoutParams(
+                        LinearLayout.LayoutParams.WRAP_CONTENT,
+                        (int) (44 * getResources().getDisplayMetrics().density));
+        lp.setMarginStart(6 * d);
+        b.setLayoutParams(lp);
+        b.setOnClickListener(l);
+        b.setVisibility(View.GONE);
+        toolbar.addView(b, 0);
+        return b;
+    }
+
     private void updateMouseBar() {
-        mouseBar.setVisibility(streamView.getControlMode() == StreamView.MODE_MOUSE
-                ? View.VISIBLE : View.GONE);
+        int vis = streamView.getControlMode() == StreamView.MODE_MOUSE
+                ? View.VISIBLE : View.GONE;
+        mouseLeftBtn.setVisibility(vis);
+        mouseRightBtn.setVisibility(vis);
     }
 
     private void showQualityPopup(View anchor) {
@@ -484,7 +503,6 @@ public class SessionActivity extends Activity
         streamView.applyPrefs(prefs);
         streamView.setDecodeSampleSize(QUALITY_SAMPLE[idx]);
         adaptiveReduced = false;
-        adaptiveBadge.setVisibility(View.GONE);
         if (toast) Toast.makeText(this, qualityLabel(QUALITIES[idx]),
                 Toast.LENGTH_SHORT).show();
     }
@@ -1385,13 +1403,6 @@ public class SessionActivity extends Activity
             if (bad && !adaptiveReduced) {
                 adaptiveReduced = true;
                 streamView.setDecodeSampleSize(2);
-                // Silent and once: the banner appears quietly the first time
-                // quality drops, then never pops again this session.
-                if (!adaptiveBadgeShown) {
-                    adaptiveBadgeShown = true;
-                    adaptiveBadge.setText(R.string.adaptive_reduced);
-                    adaptiveBadge.setVisibility(View.VISIBLE);
-                }
                 rttGoodStreak = 0;
             } else if (bad) {
                 rttGoodStreak = 0;
@@ -1414,7 +1425,6 @@ public class SessionActivity extends Activity
             if (QUALITIES[i].equals(q)) idx = i;
         }
         streamView.setDecodeSampleSize(QUALITY_SAMPLE[idx]);
-        adaptiveBadge.setVisibility(View.GONE);
     }
 
     @Override
