@@ -242,4 +242,29 @@
     <string name="pair_bad_code">Enter the 6-digit code from the host.</string>
     <string name="pair_legacy">This host doesn\'t support pairing codes yet (it needs the v4 host).</string>
     <string name="pair_paired">Paired — connecting…</string>
+    <!-- camera for verification -->
+    <string name="cam_title">Camera for Verification</string>
+    <string name="cam_explain">Your phone becomes this Linux machine\'s camera for verification. The camera starts only when you tap Start, shows a persistent indicator while active, and nothing is recorded. The Linux side cannot turn your camera on.</string>
+    <string name="cam_start">Start Camera</string>
+    <string name="cam_stop">Stop Camera</string>
+    <string name="cam_switch">Switch Camera</string>
+    <string name="cam_front">Front Camera</string>
+    <string name="cam_rear">Rear Camera</string>
+    <string name="cam_starting">Starting camera…</string>
+    <string name="cam_streaming">Camera streaming to host</string>
+    <string name="cam_active_title">● Camera ACTIVE</string>
+    <string name="cam_active_info">%1$s · %2$dx%3$d @ %4$d fps\nStreaming to the Linux host as a virtual camera.\nTap Stop Camera when done.</string>
+    <string name="cam_indicator_active">● CAMERA ACTIVE · %1$s</string>
+    <string name="cam_indicator_starting">● Starting camera…</string>
+    <string name="cam_needs_v4">Camera verification needs a v4 host (1.1.0+).</string>
+    <string name="cam_perm_title">Camera permission</string>
+    <string name="cam_perm_denied">Camera permission denied — cannot start the verification camera.</string>
+    <string name="cam_perm_permanent">Camera permission is permanently denied. Open Settings to allow it for verification.</string>
+    <string name="cam_perm_revoked">Camera permission was revoked — camera stopped.</string>
+    <string name="cam_open_settings">Open Settings</string>
+    <string name="cam_no_camera">No %1$s camera on this device.</string>
+    <string name="cam_no_response">The host did not answer the camera request.</string>
+    <string name="cam_init_failed">Camera failed to start: %1$s</string>
+    <string name="cam_error">Camera error: %1$s</string>
+    <string name="cam_stopped_by_host">Camera stopped by the host.</string>
 </resources>
