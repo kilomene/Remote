@@ -49,6 +49,10 @@ public class RemoteClient {
         default void onPermsResp(String deviceId, boolean ok, String detail) {}
         default void onPermsDenied(String op, String reason) {}
         default void onPermsList(String json) {}
+
+        // v4 camera for verification — default no-ops so older listeners keep working.
+        default void onCameraStatus(String json) {}
+        default void onCameraStopReceived() {}
     }
 
     private final Context ctx;
@@ -278,6 +282,43 @@ public class RemoteClient {
         send(RemoteProto.PERMS_LIST, "{}".getBytes(UTF8));
     }
 
+    // ---- v4 camera for verification ---------------------------------------
+
+    /**
+     * 0x87 CAMERA_START c->s {width,height,fps,facing,rotation,mirror,codec}.
+     * Sent only after the user explicitly taps Start Camera; the host
+     * replies with CAMERA_STATUS (never auto-starts anything by itself).
+     */
+    public void sendCameraStart(int width, int height, int fps, String facing,
+                                int rotation, boolean mirror) {
+        try {
+            JSONObject o = new JSONObject();
+            o.put("width", width);
+            o.put("height", height);
+            o.put("fps", fps);
+            o.put("facing", facing);
+            o.put("rotation", rotation);
+            o.put("mirror", mirror);
+            o.put("codec", "h264");
+            send(RemoteProto.CAMERA_START, o.toString().getBytes(UTF8));
+        } catch (JSONException ignored) {
+        }
+    }
+
+    /** 0x88 CAMERA_STOP c->s (empty). */
+    public void sendCameraStop() {
+        send(RemoteProto.CAMERA_STOP, new byte[0]);
+    }
+
+    /**
+     * 0x89 CAMERA_FRAME c->s: one Annex-B access unit. Called from the
+     * camera sender thread; RemoteProto.sendMsg serializes on the stream.
+     */
+    public void sendCameraFrame(byte[] accessUnit) {
+        if (accessUnit == null || accessUnit.length == 0) return;
+        send(RemoteProto.CAMERA_FRAME, accessUnit);
+    }
+
     private static byte[] jsonPath(String path) {
         try {
             JSONObject o = new JSONObject();
@@ -373,6 +414,10 @@ public class RemoteClient {
                     dispatchPermsDenied(m.payload);
                 } else if (m.type == RemoteProto.PERMS_LIST_RESP) {
                     listener.onPermsList(new String(m.payload, UTF8));
+                } else if (m.type == RemoteProto.CAMERA_STATUS) {
+                    listener.onCameraStatus(new String(m.payload, UTF8));
+                } else if (m.type == RemoteProto.CAMERA_STOP) {
+                    listener.onCameraStopReceived();
                 } else if (m.type == RemoteProto.DISCONNECT) {
                     return;
                 }
