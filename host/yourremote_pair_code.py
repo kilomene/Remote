@@ -56,7 +56,12 @@ def issue(device_name, store=DEFAULT_STORE):
         raise SystemExit(
             "ERROR: host/auth.py does not expose the documented interface "
             "PairingManager(path).issue_code(device_name) -> str: %s" % e)
-    code = issue_fn(device_name)
+    try:
+        code = issue_fn(device_name)
+    except OSError as e:
+        raise SystemExit(
+            "ERROR: could not save the pairing code (%s).\n"
+            "Run with sudo so it can write the pairing store." % e)
     if not isinstance(code, str) or not code.strip():
         raise SystemExit("ERROR: PairingManager.issue_code() did not return "
                          "a code string")
