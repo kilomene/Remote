@@ -165,6 +165,9 @@ public class SessionActivity extends Activity
     private int rttCount;
     private int rttGoodStreak;
     private boolean adaptiveReduced;
+    // Badge shows once per session, quietly. The quality still adapts on
+    // later latency spikes, but the banner never pops again.
+    private boolean adaptiveBadgeShown;
 
     // session timeout
     private final Runnable timeoutFire = new Runnable() {
@@ -1382,8 +1385,13 @@ public class SessionActivity extends Activity
             if (bad && !adaptiveReduced) {
                 adaptiveReduced = true;
                 streamView.setDecodeSampleSize(2);
-                adaptiveBadge.setText(R.string.adaptive_reduced);
-                adaptiveBadge.setVisibility(View.VISIBLE);
+                // Silent and once: the banner appears quietly the first time
+                // quality drops, then never pops again this session.
+                if (!adaptiveBadgeShown) {
+                    adaptiveBadgeShown = true;
+                    adaptiveBadge.setText(R.string.adaptive_reduced);
+                    adaptiveBadge.setVisibility(View.VISIBLE);
+                }
                 rttGoodStreak = 0;
             } else if (bad) {
                 rttGoodStreak = 0;
