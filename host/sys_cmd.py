@@ -1,8 +1,15 @@
-"""host/sys_cmd.py -- SYSTEM_CMD (0x60) allowlist executor for Remote v3.
+"""host/sys_cmd.py -- SYSTEM_CMD (0x60) allowlist executor for Remote v4.
 
 STRICT allowlist: the viewer may only trigger named system actions; there is
 NEVER a raw shell. Anything not on the list is rejected with
 {cmd, ok: False, detail: "not allowed"}.
+
+v4: "service" runs `systemctl <action> <name>` synchronously and reports the
+real outcome honestly (ok:false with detail when it fails, e.g. without
+privileges); "launch-app" resolves names ONLY through host/apps.py
+AppLauncher (empty apps.conf = deny-all). Permission flags: "apps" gates
+launch-app, "automation" gates EXEC_RUN (host/automation.py), "system" gates
+the rest.
 
 All subprocess calls use argv lists (no shell=True anywhere), and launched
 GUI apps run detached (Popen, start_new_session=True) so the host loop is
@@ -38,13 +45,21 @@ TERMINAL_EMULATORS = ["x-terminal-emulator", "gnome-terminal", "konsole", "xterm
 class SysCmdExecutor:
     """Executes validated system commands. dry_run=True skips execution."""
 
-    def __init__(self, dry_run=False, displays_fn=None, monitored_services=None):
+    def __init__(self, dry_run=False, displays_fn=None, monitored_services=None,
+                 apps_launcher=None, pause_fn=None):
         self.dry_run = dry_run
         # displays_fn() -> {"displays": [{"id", ...}], "active": ...};
         # used to validate "switch-display" ids.
         self.displays_fn = displays_fn or (lambda: {"displays": [], "active": None})
         # "service" may only touch these units (from host.conf).
         self.monitored_services = list(monitored_services or [])
+        # "launch-app" resolves ONLY through this AppLauncher (host/apps.py).
+        # None -> created lazily on first use (keeps sys_cmd importable
+        # even if apps.py is unavailable).
+        self.apps_launcher = apps_launcher
+        # "pause-screen" drives this (pause_fn(bool) -> str|None); the
+        # integrator wires it to capture.paused.
+        self.pause_fn = pause_fn
         self._cmds = {
             "lock": self._lock,
             "logout": self._logout,
@@ -54,9 +69,11 @@ class SysCmdExecutor:
             "open-terminal": self._open_terminal,
             "open-browser": self._open_browser,
             "open-app": self._open_app,
+            "launch-app": self._launch_app,
             "blank-screen": self._blank_screen,
             "switch-display": self._switch_display,
             "service": self._service,
+            "pause-screen": self._pause_screen,
         }
 
     # -- entry point ----------------------------------------------------------
@@ -189,4 +206,63 @@ class SysCmdExecutor:
             raise SysCmdError("not allowed: unknown service %r" % (name,))
         if action not in ("start", "stop", "restart"):
             raise SysCmdError("not allowed: action must be start, stop or restart")
-        return self._run(["systemctl", action, name])
+        if self.dry_run:
+            return "dry-run"
+        if shutil.which("systemctl") is None:
+            raise SysCmdError("systemctl not available")
+        # Synchronous: report the real outcome honestly. May fail without
+        # privileges -- that surfaces as ok:false with the detail, not a crash.
+        try:
+            r = subprocess.run(["systemctl", action, name],
+                               capture_output=True, text=True,
+                               errors="replace", timeout=30)
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise SysCmdError("systemctl failed: %s" % exc)
+        if r.returncode != 0:
+            detail = ((r.stderr or "") + (r.stdout or "")).strip().splitlines()
+            raise SysCmdError("systemctl %s %s failed (rc=%d)%s" % (
+                action, name, r.returncode,
+                (": " + detail[0][:200]) if detail else ""))
+        return "systemctl %s %s ok" % (action, name)
+
+    def _pause_screen(self, args):
+        """pause-screen {paused: bool}: pause/resume frame streaming.
+
+        Drives the integrator's pause_fn (capture.paused). Honest: without
+        a wired pause_fn this is a no-op reported as such, never a fake
+        "paused" state.
+        """
+        paused = self._require_bool(args, "paused")
+        if self.dry_run:
+            return "dry-run"
+        if self.pause_fn is None:
+            return "no capture wired (no-op)"
+        try:
+            self.pause_fn(bool(paused))
+        except Exception as exc:  # noqa: BLE001
+            raise SysCmdError("pause failed: %s" % exc)
+        return "screen paused" if paused else "screen resumed"
+
+    def _launch_app(self, args):
+        """launch-app {name}: resolved ONLY via host/apps.py AppLauncher.
+
+        Unknown name -> "not allowed". Empty/missing apps.conf is deny-all.
+        Permission flag: "apps".
+        """
+        name = args.get("name")
+        if not isinstance(name, str) or not name:
+            raise SysCmdError("not allowed: args.name must be a non-empty string")
+        launcher = self.apps_launcher
+        if launcher is None:
+            try:
+                from apps import AppLauncher
+            except ImportError as exc:
+                raise SysCmdError("app launcher unavailable: %s" % exc)
+            launcher = self.apps_launcher = AppLauncher()
+        try:
+            if self.dry_run:
+                launcher.get(name)  # validate against the allowlist only
+                return "dry-run"
+            return launcher.launch(name)
+        except Exception as exc:  # AppNotAllowed -> ok:false "not allowed"
+            raise SysCmdError(str(exc))
