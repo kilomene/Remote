@@ -1,0 +1,38 @@
+[Unit]
+Description=Remote host - remote desktop over Tailscale
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+# sd_notify is wired into host/remote_host.py (stdlib only): READY=1 once
+# the listen socket is bound, WATCHDOG=1 every 30s from a daemon thread.
+Type=notify
+NotifyAccess=main
+WatchdogSec=60
+# The host listens on TCP 47800 (>1024): no root needed. Runs fully as
+# the unprivileged service account created by the package postinst.
+User=yourremote
+Group=yourremote
+Restart=always
+RestartSec=5
+# Hardening: no new privileges, strict read-only system, private /tmp.
+# ReadWritePaths covers config + logs; host.conf/trusted_devices live in
+# /etc/remote, JSON-lines logs in /var/log/remote.
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/etc/remote /var/log/remote /tmp
+PrivateTmp=true
+# X11 capture/input injection need the desktop session. For a single-user
+# machine, drop an override in
+# /etc/systemd/system/remote-host.service.d/override.conf:
+#   [Service]
+#   Environment=DISPLAY=:0
+#   Environment=XAUTHORITY=/home/USERNAME/.Xauthority
+# Note: PrivateTmp=true hides the host /tmp/.X11-unix socket; if you run
+# the service as yourremote against an X11 session you must either relax
+# PrivateTmp in the override or run remote-host as your desktop user
+# inside the graphical session instead.
+ExecStart=/usr/bin/remote-host
+
+[Install]
+WantedBy=multi-user.target
