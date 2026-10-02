@@ -297,6 +297,41 @@ def t_network_wizard_tailscale_up_streams_url():
     (status, got), dt, out = run_with_fake('echo "already up"\n', timeout=10)
     assert status == "ok" and got is None, (status, got)
     assert "no auth URL" in out, out
+def t_network_wizard_nosystemd_helpers():
+    # have_systemd() mirrors the canonical /run/systemd/system check
+    assert netsetup.have_systemd() == os.path.isdir("/run/systemd/system")
+    # start_tailscaled_nosystemd(): daemon already answering -> no relaunch;
+    # daemon never answering -> WizardError naming the log (sleep stubbed).
+    orig_resp = netsetup.tailscaled_responding
+    orig_popen = netsetup.subprocess.Popen
+    orig_sleep = netsetup.time.sleep
+    launched = []
+
+    class FakePopen:
+        def __init__(self, argv, **kw):
+            launched.append(argv)
+
+    try:
+        netsetup.tailscaled_responding = lambda: True
+        netsetup.subprocess.Popen = FakePopen
+        netsetup.time.sleep = lambda s: None
+        netsetup.start_tailscaled_nosystemd()   # must not raise/launch
+        assert launched == [], launched
+        netsetup.tailscaled_responding = lambda: False
+        try:
+            netsetup.start_tailscaled_nosystemd()
+            raise AssertionError("expected WizardError when daemon never answers")
+        except netsetup.WizardError as e:
+            assert "did not come up" in str(e), e
+        assert launched and launched[0][0] == "/usr/local/bin/tailscaled", launched
+        assert "--port=41641" in launched[0], launched
+        assert "--socket=/run/tailscale/tailscaled.sock" in launched[0], launched
+    finally:
+        netsetup.tailscaled_responding = orig_resp
+        netsetup.subprocess.Popen = orig_popen
+        netsetup.time.sleep = orig_sleep
+
+
 def t_network_wizard_static_fallback():
     # arch mapping
     assert netsetup.static_arch("x86_64") == "amd64"
@@ -393,6 +428,7 @@ def main():
     check("network wizard --help + steps", t_network_wizard_help_and_steps)
     check("network wizard distro flavor", t_network_wizard_distro_flavor)
     check("network wizard static fallback", t_network_wizard_static_fallback)
+    check("network wizard nosystemd helpers", t_network_wizard_nosystemd_helpers)
     check("network wizard tailscale_up streams url",
           t_network_wizard_tailscale_up_streams_url)
     check("deb build contents", t_deb_build_contents)
