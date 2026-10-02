@@ -373,7 +373,12 @@ EOF
 # container's other X servers.
 ensure_remote_display() {
     local display=":10"
-    if [ -S /tmp/.X11-unix/X10 ]; then
+    local sock="/tmp/.X11-unix/X10"
+    # Clean up stale socket (Xvfb died but socket remains)
+    if [ -S "$sock" ] && ! pgrep -f "Xvfb :10" >/dev/null 2>&1; then
+        rm -f "$sock"
+    fi
+    if [ -S "$sock" ]; then
         log "Remote display $display already running"
         printf '%s' "$display"
         return 0
@@ -381,22 +386,24 @@ ensure_remote_display() {
     have Xvfb || { warn "Xvfb not found, cannot create Remote display"; return 1; }
     log "starting dedicated Xvfb for Remote on $display"
     mkdir -p /var/log/remote 2>/dev/null || true
+    chown "$SERVICE_USER:$SERVICE_USER" /var/log/remote 2>/dev/null || true
     # Run as SERVICE_USER so the host can connect without cookie issues.
-    # Use nohup+setsid so it survives the installer exiting.
-    nohup setsid runuser -u "$SERVICE_USER" -- Xvfb "$display" -screen 0 1280x800x24 >/var/log/remote/xvfb.log 2>&1 < /dev/null &
-    # Wait for the socket
+    # nohup + redirect stdin from /dev/null so it survives the installer.
+    # (setsid not always available; nohup is enough with stdin closed)
+    nohup runuser -u "$SERVICE_USER" -- Xvfb "$display" -screen 0 1280x800x24 \
+        >/var/log/remote/xvfb.log 2>&1 < /dev/null &
+    # Wait for the socket (up to 10s)
     for i in $(seq 1 10); do
-        [ -S /tmp/.X11-unix/X10 ] && break
+        [ -S "$sock" ] && break
         sleep 1
     done
-    if [ -S /tmp/.X11-unix/X10 ]; then
+    if [ -S "$sock" ]; then
         log "Remote display $display ready"
         printf '%s' "$display"
         return 0
-    else
-        warn "failed to start Xvfb on $display"
-        return 1
     fi
+    warn "failed to start Xvfb on $display (see /var/log/remote/xvfb.log)"
+    return 1
 }
 
 start_host_nosystemd() {
