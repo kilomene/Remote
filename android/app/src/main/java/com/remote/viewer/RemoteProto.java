@@ -20,14 +20,17 @@ import javax.crypto.spec.PBEKeySpec;
 import javax.crypto.spec.SecretKeySpec;
 
 /**
- * Remote wire protocol v1/v2/v3 (see PROTOCOL.md).
+ * Remote wire protocol v1/v2/v3/v4 (see PROTOCOL.md).
  * Framing: [1-byte type][4-byte big-endian length][payload].
  * Auth: server sends salt(16)||nonce(32); client replies
  * HMAC-SHA256(PBKDF2-HMAC-SHA256(password, salt, 200000), nonce).
  *
- * v3 adds: SYSTEM_CMD/RESP (0x60/0x6F), TERMINAL_* (0x61-0x63),
- * CHAT_MSG (0x64), AGENT_QUERY/STATUS (0x65/0x66), DISPLAYS_QUERY/LIST
- * (0x67/0x68). 0x70-0x7F reserved for audio (planned, constants only).
+ * v4 adds (see PROTOCOL.md), all byte-identical with the host:
+ * TERMINAL_RESIZE (0x69), AUDIO_START/DATA/STOP/ERROR (0x70-0x73),
+ * WEBCAM_LIST/FRAME (0x74/0x75), NET_STATUS (0x76),
+ * PAIR_REQUEST/RESULT/REQUIRED (0x77-0x79), EXEC_RUN/RESULT (0x7A/0x7B),
+ * POLICY_GET (0x7C), SESSION_TOKEN/ROTATE (0x85/0x86),
+ * CAMERA_START/STOP/FRAME/STATUS (0x87-0x8A).
  * AUTH_OK carries b"REMOTE/N"; any REMOTE/N is accepted and the version
  * is exposed via {@link #lastProtoVersion} for graceful degradation.
  */
@@ -71,10 +74,25 @@ public final class RemoteProto {
     public static final int DISPLAYS_LIST = 0x68;    // s->c {displays:[{id,name,w,h,primary}], active}
     public static final int SYSTEM_RESP = 0x6F;      // s->c {cmd, ok, detail}
 
-    // 0x70-0x7F: audio streaming — RESERVED, planned. Constants only.
-    public static final int AUDIO_START = 0x70;
-    public static final int AUDIO_DATA = 0x71;
-    public static final int AUDIO_STOP = 0x72;
+    // 0x70-0x7F: v4 block (see PROTOCOL.md; byte-identical with the host).
+    // Audio is real host-side in v4; the Android playback UI ships later.
+    public static final int AUDIO_START = 0x70;   // c->s {source}
+    public static final int AUDIO_DATA = 0x71;    // s->c raw audio (12-byte header)
+    public static final int AUDIO_STOP = 0x72;    // bidi (empty)
+    public static final int AUDIO_ERROR = 0x73;   // s->c {detail}
+    public static final int WEBCAM_LIST = 0x74;   // c->s {} / s->c {cameras:[{id,name}]}
+    public static final int WEBCAM_FRAME = 0x75;  // c->s {id} / s->c JPEG bytes
+    public static final int NET_STATUS = 0x76;    // c->s {} / s->c {online, tailscale_ip,
+                                                  //   peer_latency_ms, direct}
+    public static final int PAIR_REQUEST = 0x77;  // c->s {code, device_id, device_name, platform}
+    public static final int PAIR_RESULT = 0x78;   // s->c {ok, detail?}
+    public static final int PAIR_REQUIRED = 0x79;// s->c {device_id}
+    public static final int EXEC_RUN = 0x7A;      // c->s {name, args:[]} allowlisted automation
+    public static final int EXEC_RESULT = 0x7B;   // s->c {name, ok, output, error?}
+    public static final int POLICY_GET = 0x7C;    // c->s {} / s->c {toggles}
+
+    // v4: terminal resize fills the old v3 spare slot 0x69.
+    public static final int TERMINAL_RESIZE = 0x69; // c->s {session, cols, rows}
 
     // v3 multi-user permissions (host-enforced).
     public static final int PERMS_SET = 0x80;        // c->s {device_id, permissions:{...}}
@@ -85,9 +103,22 @@ public final class RemoteProto {
                                                     //   platform, first_seen, last_seen,
                                                     //   permissions:{...}}]}
 
-    /** The 7 permission flags the host enforces per trusted device. */
+    // v4 session tokens (0x85-0x86), s->c {token, expires_in}
+    public static final int SESSION_TOKEN = 0x85;
+    public static final int SESSION_ROTATE = 0x86;
+
+    // v4 camera for verification (0x87-0x8A). Host side is real in v4;
+    // the Android capture side ships in a later release.
+    public static final int CAMERA_START = 0x87;   // c->s {width, height, fps, facing}
+    public static final int CAMERA_STOP = 0x88;    // bidi (empty)
+    public static final int CAMERA_FRAME = 0x89;   // c->s raw H264 Annex-B
+    public static final int CAMERA_STATUS = 0x8A;  // s->c {active, device, width, height,
+                                                   //   fps, error?}
+
+    /** The 12 permission flags the host enforces per trusted device. */
     public static final String[] PERMISSIONS = {
-            "view", "mouse", "keyboard", "clipboard", "files", "terminal", "system"};
+            "view", "mouse", "keyboard", "clipboard", "files", "terminal",
+            "system", "audio", "webcam", "apps", "automation", "camera"};
 
     /** Protocol version from the last successful AUTH_OK (REMOTE/N). */
     public static volatile int lastProtoVersion = 1;
