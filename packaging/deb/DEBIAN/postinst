@@ -10,10 +10,11 @@ if ! id yourremote >/dev/null 2>&1; then
         --comment "Remote host service account" yourremote
 fi
 
-mkdir -p /etc/remote /var/log/remote
-chown yourremote:yourremote /etc/remote /var/log/remote
+mkdir -p /etc/remote /var/log/remote /var/lib/remote/files
+chown yourremote:yourremote /etc/remote /var/log/remote /var/lib/remote /var/lib/remote/files
 chmod 700 /etc/remote
 chmod 750 /var/log/remote
+chmod 750 /var/lib/remote /var/lib/remote/files
 
 # video group so the service user can open the v4l2loopback virtual
 # camera (/dev/video0) used by the Camera-for-Verification feature.
