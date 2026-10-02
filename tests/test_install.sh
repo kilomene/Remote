@@ -187,17 +187,35 @@ pass "arg parsing"
 
 echo "=== [8] wizard --authkey builds correct argv, redacts key ==="
 python3 - <<'EOF'
-import sys, io, contextlib
+import sys, io, os, contextlib
 sys.path.insert(0, "host")
 import yourremote_network_setup as w
-calls = []
-w.run = lambda argv, check=False, timeout=120: (calls.append(argv), (0, "", ""))[1]
+
+class FakePopen:
+    instances = []
+    def __init__(self, argv, **kw):
+        self.argv = argv
+        r, wfd = os.pipe()          # real fds: select() works on them
+        os.write(wfd, b"already up\n")
+        os.close(wfd)
+        self.stdout = os.fdopen(r, "r", 1)
+        FakePopen.instances.append(self)
+    def poll(self):
+        return 0
+    def wait(self, timeout=None):
+        return 0
+    def kill(self):
+        pass
+
+w.subprocess.Popen = FakePopen
 buf = io.StringIO()
 with contextlib.redirect_stdout(buf):
     assert w.tailscale_up(headscale_url="https://hs.example.com", authkey="tskey-SECRET") is None
 out = buf.getvalue()
-assert calls[0] == ["tailscale", "up", "--login-server", "https://hs.example.com",
-                    "--authkey", "tskey-SECRET"], calls[0]
+assert FakePopen.instances, "tailscale was not launched"
+argv = FakePopen.instances[0].argv
+assert argv == ["tailscale", "up", "--login-server", "https://hs.example.com",
+                "--authkey", "tskey-SECRET"], argv
 assert "tskey-SECRET" not in out, "authkey leaked: " + out
 assert "<redacted>" in out
 print("wizard authkey: OK")
