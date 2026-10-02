@@ -368,6 +368,36 @@ EOF
     fi
 }
 
+# Starts a dedicated Xvfb for Remote on :10 if not already running.
+# This gives Remote a clean, known-good display independent of the
+# container's other X servers.
+ensure_remote_display() {
+    local display=":10"
+    if [ -S /tmp/.X11-unix/X10 ]; then
+        log "Remote display $display already running"
+        printf '%s' "$display"
+        return 0
+    fi
+    have Xvfb || { warn "Xvfb not found, cannot create Remote display"; return 1; }
+    log "starting dedicated Xvfb for Remote on $display"
+    mkdir -p /var/log/remote 2>/dev/null || true
+    # Run as SERVICE_USER so the host can connect without cookie issues
+    runuser -u "$SERVICE_USER" -- Xvfb "$display" -screen 0 1280x800x24 >/var/log/remote/xvfb.log 2>&1 &
+    # Wait for the socket
+    for i in $(seq 1 10); do
+        [ -S /tmp/.X11-unix/X10 ] && break
+        sleep 1
+    done
+    if [ -S /tmp/.X11-unix/X10 ]; then
+        log "Remote display $display ready"
+        printf '%s' "$display"
+        return 0
+    else
+        warn "failed to start Xvfb on $display"
+        return 1
+    fi
+}
+
 start_host_nosystemd() {
     # remote-host listens on TCP 47800 (>1024): runs as $SERVICE_USER.
     # sd_notify is a no-op without NOTIFY_SOCKET, so a plain background
@@ -384,31 +414,38 @@ start_host_nosystemd() {
     fi
     have runuser || die "need 'runuser' to start remote-host without systemd"
     [ "$DRY_RUN" = 1 ] && { echo "[dry-run] + start remote-host directly (no systemd)" >&2; return 0; }
-    # Screen capture / input injection need the desktop session's DISPLAY
-    # and X cookie. As root we copy the cookie to a $SERVICE_USER-owned file.
-    local xenv="" sess=""
-    if sess="$(detect_desktop_session)"; then
-        local xuser="${sess%%|*}" rest="${sess#*|}"
-        local display="${rest%%|*}" xauth="${rest#*|}"
-        log "desktop session: user=$xuser display=$display"
-        xenv="DISPLAY=$display"
-        if [ -n "$xauth" ]; then
-            cp -f "$xauth" /etc/remote/xauthority \
-                || die "could not copy X authority cookie from $xauth"
-            chown "$SERVICE_USER:$SERVICE_USER" /etc/remote/xauthority
-            chmod 600 /etc/remote/xauthority
-            xenv="$xenv XAUTHORITY=/etc/remote/xauthority"
-        elif [ -f /etc/remote/xauthority ]; then
-            # Reuse the cookie from a previous working install.
-            chown "$SERVICE_USER:$SERVICE_USER" /etc/remote/xauthority 2>/dev/null || true
-            chmod 600 /etc/remote/xauthority 2>/dev/null || true
-            xenv="$xenv XAUTHORITY=/etc/remote/xauthority"
-            log "reusing existing XAUTHORITY cookie from previous install"
-        else
-            log "no XAUTHORITY cookie found — trying without one"
-        fi
+    # Remote uses a dedicated Xvfb on :10 — clean, known-good, independent
+    # of the container's other X servers.
+    local xenv="" rdisplay=""
+    if rdisplay="$(ensure_remote_display)"; then
+        xenv="DISPLAY=$rdisplay"
+        log "using dedicated Remote display: $rdisplay"
     else
-        warn "no desktop X session detected — remote-host needs a display for screen capture."
+        # Fallback: try to detect an existing desktop session
+        local sess=""
+        if sess="$(detect_desktop_session)"; then
+            local xuser="${sess%%|*}" rest="${sess#*|}"
+            local display="${rest%%|*}" xauth="${rest#*|}"
+            log "desktop session: user=$xuser display=$display"
+            xenv="DISPLAY=$display"
+            if [ -n "$xauth" ]; then
+                cp -f "$xauth" /etc/remote/xauthority \
+                    || die "could not copy X authority cookie from $xauth"
+                chown "$SERVICE_USER:$SERVICE_USER" /etc/remote/xauthority
+                chmod 600 /etc/remote/xauthority
+                xenv="$xenv XAUTHORITY=/etc/remote/xauthority"
+            elif [ -f /etc/remote/xauthority ]; then
+                # Reuse the cookie from a previous working install.
+                chown "$SERVICE_USER:$SERVICE_USER" /etc/remote/xauthority 2>/dev/null || true
+                chmod 600 /etc/remote/xauthority 2>/dev/null || true
+                xenv="$xenv XAUTHORITY=/etc/remote/xauthority"
+                log "reusing existing XAUTHORITY cookie from previous install"
+            else
+                log "no XAUTHORITY cookie found — trying without one"
+            fi
+        else
+            warn "no desktop X session detected — remote-host needs a display for screen capture."
+        fi
     fi
     log "starting remote-host in the background as user $SERVICE_USER"
     if [ -n "$xenv" ]; then
