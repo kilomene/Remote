@@ -439,10 +439,21 @@ detect_desktop_session() {
     [ -n "$xpid" ] || return 1
     xuser="$(ps -o user= -p "$xpid" 2>/dev/null | tr -d '[:space:]')"
     [ -n "$xuser" ] || return 1
+    # Get the display from the X server's command line (e.g. "Xvfb :1" -> ":1"),
+    # not just the first socket — there may be multiple X servers.
     display=""
-    for sock in /tmp/.X11-unix/X*; do
-        if [ -S "$sock" ]; then display=":${sock##*/X}"; break; fi
-    done
+    xcmd="$(ps -o args= -p "$xpid" 2>/dev/null || true)"
+    if [[ "$xcmd" =~ (:[0-9]+(\.[0-9]+)?) ]]; then
+        display="${BASH_REMATCH[1]}"
+        # Strip screen suffix (:1.0 -> :1)
+        display="${display%%.*}"
+    fi
+    if [ -z "$display" ]; then
+        # Fallback: first available socket
+        for sock in /tmp/.X11-unix/X*; do
+            if [ -S "$sock" ]; then display=":${sock##*/X}"; break; fi
+        done
+    fi
     [ -n "$display" ] || display=":0"
     # XAUTHORITY is best-effort: some servers (Xvfb/xhost setups) need no
     # cookie. Only pass it when we actually find the file.
