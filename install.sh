@@ -398,6 +398,12 @@ start_host_nosystemd() {
             chown "$SERVICE_USER:$SERVICE_USER" /etc/remote/xauthority
             chmod 600 /etc/remote/xauthority
             xenv="$xenv XAUTHORITY=/etc/remote/xauthority"
+        elif [ -f /etc/remote/xauthority ]; then
+            # Reuse the cookie from a previous working install.
+            chown "$SERVICE_USER:$SERVICE_USER" /etc/remote/xauthority 2>/dev/null || true
+            chmod 600 /etc/remote/xauthority 2>/dev/null || true
+            xenv="$xenv XAUTHORITY=/etc/remote/xauthority"
+            log "reusing existing XAUTHORITY cookie from previous install"
         else
             log "no XAUTHORITY cookie found — trying without one"
         fi
