@@ -38,11 +38,78 @@ the viewer as a native Android app (APKs on GitHub Releases).
     chat log on the host. Real broadcast, real persistence — no stub.
 13. **Display listing** — `DISPLAYS_QUERY`/`DISPLAYS_LIST` parsed from
     `xrandr` (synthetic fallback when headless).
-14. **Multi-user / permissions** — `PERMS_*` (0x80–0x84): seven boolean flags
-    per trusted device (`view, mouse, keyboard, clipboard, files, terminal,
-    system`), fail-closed enforcement *before* handling (violations get
+14. **Multi-user / permissions** — `PERMS_*` (0x80–0x84): twelve boolean
+    flags per trusted device (`view, mouse, keyboard, clipboard, files,
+    terminal, system, audio, webcam, apps, automation, camera`),
+    fail-closed enforcement *before* handling (violations get
     `PERMS_DENIED` and are dropped), no-view devices get no frames, a device
     cannot change its own permissions, changes apply live and persist.
+
+## v4 / 1.0.0 — shipped (host side, Linux)
+
+The Linux host is now a complete product. Everything below is real —
+no demo, no fake (anything the stack cannot provide degrades with an
+honest error, never a placeholder).
+
+15. **Screen capture, multi-backend** — X11 (`mss`), native Wayland via the
+    xdg-desktop-portal ScreenCast handshake (in-process D-Bus client +
+    GStreamer `pipewiresrc`; honest `RuntimeError` when the portal, bus, or
+    GStreamer is absent), synthetic test-pattern backend for self-test.
+    Multi-monitor via real `xrandr` listing + display switching; privacy
+    mode (`hide_on_connect`) blanks the monitor while a client is attached.
+16. **Adaptive streaming** — FPS/quality ladder driven by measured
+    socket-send latency (p95 RTT > 250 ms drops a rung, < 80 ms for 10 s
+    raises one); base FPS selectable 15/30/45/60 in `host.conf`. Pause
+    via `SYSTEM_CMD "pause-screen" {paused}`.
+17. **Extended input** — double-click, horizontal scroll, relative moves
+    (pointer-accel 0.25–4.0), Unicode text injection (per-char keys with a
+    real clipboard-paste fallback; dropped with a warning when neither
+    path exists). New event types are permission-gated (`dblclick`/
+    `hscroll`/`rel` → mouse, `text` → keyboard).
+18. **Pairing** — permanent `YR-XXXX-XXXX` host id, single-use 6-digit codes
+    (10-min TTL, persisted), pre-auth `PAIR_REQUEST`/`PAIR_RESULT` flow,
+    `PAIR_REQUIRED` when policy `require_pairing` is set; QR PNG codes via
+    the vendored `qrcode` wheel; per-IP fail2ban-style rate limiting with
+    backoff on auth failures; blocklist (`block`/`is_blocked`) and
+    time-boxed permission grants in the device store; session tokens
+    (`SESSION_TOKEN` post-`AUTH_OK`, hourly `SESSION_ROTATE`) bound to the
+    live connection, revoked on disconnect.
+19. **Policy toggles** — `/etc/remote/policy.conf`: `require_approval`
+    (local tkinter/zenity dialog, 60 s; headless hosts are pairing-code
+    only), `require_pairing`, `allow_files/terminal/clipboard/audio/webcam`
+    master switches (denials get `PERMS_DENIED {reason: "disabled by
+    policy"}`), `hide_on_connect`, `idle_disconnect_min`.
+20. **Remote audio** — real capture (`parec`/`pw-record` monitor sources),
+    Opus via `opusenc` when present else raw PCM; every `AUDIO_DATA` chunk
+    carries a 12-byte self-describing header (`PCM1`/`OPUS1`, rate,
+    channels). No audio stack → honest `AUDIO_ERROR`.
+21. **Webcam** — real v4l2 single-frame JPEG capture (`ffmpeg`/`fswebcam`)
+    from `/sys/class/video4linux` enumeration; failed captures get
+    `WEBCAM_FRAME` with JSON `{error}`.
+22. **Tailscale integration** — `NET_STATUS` reports real
+    `tailscale status --json` + `tailscale ping` latency/directness;
+    `yourremote-network-setup` wizard automates `tailscale up` (Headscale
+    `--login-server` supported).
+23. **Automation** — `EXEC_RUN`/`EXEC_RESULT` against an allowlisted
+    `commands.conf` (arg sanitization, 30 s timeout), gated by the
+    `automation` flag; `SYSTEM_CMD "launch-app"` resolves only through the
+    `apps.conf` allowlist (empty = deny-all), gated by the `apps` flag;
+    dev-tool detection merged into `AGENT_STATUS`.
+24. **Terminal, extended** — `TERMINAL_RESIZE` (real `TIOCSWINSZ`),
+    validated shell (`/etc/shells`) and sanitized env passthrough on open.
+25. **Camera for verification** — phone H264 frames (`CAMERA_FRAME`)
+    decoded by a real `ffmpeg` pipeline into a v4l2loopback
+    `/dev/video0`; consent-gated (explicit start/stop, front/rear,
+    resolution/FPS), 60 s inactivity auto-stop, fail-closed `camera`
+    permission, every session logged. Missing v4l2loopback/ffmpeg →
+    actionable `CameraError`, never faked.
+26. **Ops** — JSON-lines structured log (`/var/log/remote/remote.jsonl`,
+    rotation) alongside the connection log; systemd `Type=notify` +
+    `WatchdogSec=60` with real `sd_notify` (`READY=1`, `WATCHDOG=1`/30 s);
+    hardened unit (unprivileged `yourremote` user, `NoNewPrivileges`,
+    `ProtectSystem=strict`); update checker against GitHub releases;
+    plugin registry for message handlers; TUI settings editor; tray
+    indicator (best-effort headless no-op).
 
 ## v3 — shipped (Android viewer)
 
@@ -111,10 +178,12 @@ placebo UI was cut, not shipped.
 
 | # | Feature | Protocol range | Notes |
 |---|---------|----------------|-------|
-| 15 | Audio streaming | 0x70–0x7F | PLANNED — host loopback capture is the hard part; range reserved only |
-| 20 | Connection-quality stats | — | RTT shown live; loss/jitter + host-side adaptive bitrate planned |
-| 21 | LAN discovery / WebRTC | 0x90–0x9F | future transport option alongside Tailscale |
-| — | Host-side trust revoke | — | client-side revoke is local-only; host-side revoke planned |
+| 27 | Audio playback (Android) | 0x70–0x73 | host-side capture is REAL in v4; the Android audio player UI ships in the next Android release |
+| 28 | Camera capture (Android) | 0x87–0x8A | host-side virtual-camera sink is REAL in v4; the Android Camera2 capture side ships in the next Android release |
+| 29 | Voice RTX | 0x90–0x97 | PLANNED — range reserved only |
+| 20 | Connection-quality stats | — | RTT shown live; loss/jitter planned |
+| 21 | LAN discovery / WebRTC | 0x98–0x9F | future transport option alongside Tailscale (was 0x90–0x9F; 0x90–0x97 now reserved for voice RTX) |
+| — | Host-side trust revoke (Android UI) | — | the host device store supports revoke/block/grants; the Android security-center revoke is still local-only |
 
 The old v3-planned items 10 (screenshots), 11 (screen recording), 17
 (notifications), 18 (session history UI), 19 (biometric lock) shipped in
@@ -125,9 +194,10 @@ the Android v3 viewer above.
 - **Message-type registry with reserved ranges** — PROTOCOL.md assigns every
   future feature a dedicated range up front. Adding a feature = filling in
   its range, never renumbering.
-- **Host handler registry** — `HostServer.handlers` maps one message type to
-  one function (`host/remote_host.py`). New features add a handler function
-  (+ a module like `host/file_transfer.py`); the connection loop is untouched.
+- **Host handler registry** — `host/plugins.py` (`PluginRegistry`) maps one
+  message type to one `(handler, permission-flag)` pair
+  (`host/remote_host.py`). New features register a handler (+ a module like
+  `host/files.py`); the connection loop is untouched.
 - **Android feature modules** — `com.remote.viewer.features.*` packages
   (`pairing`, `clipboard`, `files`, …). Each owns its wire messages and UI;
   `RemoteClient` only dispatches.
