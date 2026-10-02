@@ -430,7 +430,8 @@ def main():
     try:
         if not installed:
             if not args.yes and not confirm(
-                    "Install Tailscale from the official apt repository?"):
+                    "Install Tailscale (official apt repo, or static "
+                    "binaries if Tailscale has no repo for this distro)?"):
                 print("declined; aborting.")
                 return 1
             print("step 2/4: installing tailscale...")
