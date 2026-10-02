@@ -1,5 +1,6 @@
 package com.remote.viewer;
 
+import android.Manifest;
 import android.app.Activity;
 import android.app.AlertDialog;
 import android.content.ClipData;
@@ -7,6 +8,7 @@ import android.content.ClipboardManager;
 import android.content.Context;
 import android.content.Intent;
 import android.content.pm.ActivityInfo;
+import android.content.pm.PackageManager;
 import android.graphics.Bitmap;
 import android.net.Uri;
 import android.os.Build;
@@ -28,6 +30,8 @@ import android.widget.PopupMenu;
 import android.widget.TextView;
 import android.widget.Toast;
 
+import com.remote.viewer.features.camera.CameraProtocol;
+import com.remote.viewer.features.camera.CameraStreamer;
 import com.remote.viewer.features.clipboard.ClipboardHistory;
 import com.remote.viewer.features.clipboard.ClipboardSync;
 import com.remote.viewer.features.notify.Notify;
@@ -47,6 +51,11 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Set;
+import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * Live remote-desktop session: StreamView <-> RemoteClient, plus the full
@@ -99,7 +108,21 @@ public class SessionActivity extends Activity
     private LinearLayout recIndicator;
     private TextView recTime;
     private ScreenRecorder recorder;
-    private final Handler ui = new Handler(Looper.getMainLooper());
+    // camera for verification (v4): phone camera -> host /dev/videoN.
+    // Privacy: started ONLY by explicit user tap; never auto-starts.
+    private LinearLayout camIndicator;
+    private TextView camStatusText;
+    private CameraStreamer cameraStreamer;
+    private final BlockingQueue<byte[]> camQueue =
+            new ArrayBlockingQueue<byte[]>(4);
+    private Thread camSenderThread;
+    private final AtomicBoolean camSending = new AtomicBoolean(false);
+    private final AtomicLong camDropped = new AtomicLong(0);
+    private volatile boolean cameraPendingStart; // CAMERA_START sent, awaiting status
+    private int camPendW, camPendH, camPendFps, camPendRotation;
+    private String camPendFacing = "rear";
+    private boolean camPendMirror;
+    private static final int REQ_CAMERA_PERM = 1401;    private final Handler ui = new Handler(Looper.getMainLooper());
     private long recStartMs;
     private long pauseStartMs; // wall time when the current pause began (0 when not paused)
     private final Runnable recTicker = new Runnable() {
@@ -195,6 +218,10 @@ public class SessionActivity extends Activity
         mouseBar = findViewById(R.id.mouse_bar);
         recIndicator = findViewById(R.id.rec_indicator);
         recTime = findViewById(R.id.rec_time);
+        camIndicator = findViewById(R.id.cam_indicator);
+        camStatusText = findViewById(R.id.cam_status_text);
+        camIndicator.setOnClickListener(v -> showCameraPanel());
+        cameraStreamer = new CameraStreamer();
 
         chatDrawer = findViewById(R.id.chat_drawer);
         chatList = findViewById(R.id.chat_list);
@@ -346,6 +373,7 @@ public class SessionActivity extends Activity
         toolBtn(R.drawable.ic_info, "connection", v -> showConnectionPanel());
         toolBtn(R.drawable.ic_camera, "screenshot", v -> takeScreenshot());
         toolBtn(R.drawable.ic_record, "record", v -> toggleRecording());
+        toolBtn(R.drawable.ic_videocam, "camera verification", v -> onCameraButton());
         toolBtn(R.drawable.ic_clipboard, "clipboard history", v -> {
             toggleView(clipDrawer);
             chatDrawer.setVisibility(View.GONE);
@@ -757,6 +785,287 @@ public class SessionActivity extends Activity
         }
     }
 
+    // ---- camera for verification (v4) -----------------------------------------
+
+    private void onCameraButton() {
+        if (cameraStreamer.isStreaming() || cameraPendingStart) {
+            showCameraPanel();
+            return;
+        }
+        RemoteClient c = client;
+        if (c == null || !connected || c.getProtoVersion() < 4) {
+            Toast.makeText(this, R.string.cam_needs_v4, Toast.LENGTH_LONG).show();
+            return;
+        }
+        if (checkSelfPermission(Manifest.permission.CAMERA)
+                == PackageManager.PERMISSION_GRANTED) {
+            showCameraPanel();
+        } else {
+            requestPermissions(new String[]{Manifest.permission.CAMERA},
+                    REQ_CAMERA_PERM);
+        }
+    }
+
+    @Override
+    public void onRequestPermissionsResult(int requestCode, String[] permissions,
+                                           int[] grantResults) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+        if (requestCode != REQ_CAMERA_PERM) return;
+        boolean granted = grantResults.length > 0
+                && grantResults[0] == PackageManager.PERMISSION_GRANTED;
+        if (granted) {
+            showCameraPanel();
+        } else if (!shouldShowRequestPermissionRationale(
+                Manifest.permission.CAMERA)) {
+            // permanently denied: offer app settings once, never nag
+            new AlertDialog.Builder(this)
+                    .setTitle(R.string.cam_perm_title)
+                    .setMessage(R.string.cam_perm_permanent)
+                    .setPositiveButton(R.string.cam_open_settings, (d, w) -> {
+                        Intent i = new Intent(
+                                android.provider.Settings
+                                        .ACTION_APPLICATION_DETAILS_SETTINGS,
+                                Uri.fromParts("package", getPackageName(), null));
+                        startActivity(i);
+                    })
+                    .setNegativeButton(R.string.cancel, null)
+                    .show();
+        } else {
+            Toast.makeText(this, R.string.cam_perm_denied, Toast.LENGTH_LONG).show();
+        }
+    }
+
+    private void showCameraPanel() {
+        if (cameraStreamer.isStreaming()) {
+            String info = getString(R.string.cam_active_info,
+                    "front".equals(cameraStreamer.getFacing())
+                            ? getString(R.string.cam_front)
+                            : getString(R.string.cam_rear),
+                    cameraStreamer.getWidth(), cameraStreamer.getHeight(),
+                    cameraStreamer.getFps());
+            new AlertDialog.Builder(this)
+                    .setTitle(R.string.cam_active_title)
+                    .setMessage(info)
+                    .setPositiveButton(R.string.cam_stop,
+                            (d, w) -> stopCamera(null))
+                    .setNeutralButton(R.string.cam_switch,
+                            (d, w) -> switchCamera())
+                    .setNegativeButton(R.string.cancel, null)
+                    .show();
+            return;
+        }
+        if (cameraPendingStart) {
+            Toast.makeText(this, R.string.cam_starting, Toast.LENGTH_SHORT).show();
+            return;
+        }
+        final String[] facings = {"rear", "front"};
+        final String[] labels = {getString(R.string.cam_rear),
+                getString(R.string.cam_front)};
+        final int[] sel = {0};
+        if (CameraStreamer.findCamera(this, "rear") == null
+                && CameraStreamer.findCamera(this, "front") != null) {
+            sel[0] = 1;
+        }
+        new AlertDialog.Builder(this)
+                .setTitle(R.string.cam_title)
+                .setMessage(R.string.cam_explain)
+                .setSingleChoiceItems(labels, sel[0], (d, which) -> sel[0] = which)
+                .setPositiveButton(R.string.cam_start,
+                        (d, w) -> startCameraFlow(facings[sel[0]]))
+                .setNegativeButton(R.string.cancel, null)
+                .show();
+    }
+
+    /**
+     * Explicit user tap is the ONLY trigger. Resolves the camera
+     * capabilities, sends CAMERA_START, and waits for the host's
+     * CAMERA_STATUS before capturing a single frame.
+     */
+    private void startCameraFlow(String facing) {
+        RemoteClient c = client;
+        if (c == null || !connected || c.getProtoVersion() < 4) {
+            Toast.makeText(this, R.string.cam_needs_v4, Toast.LENGTH_LONG).show();
+            return;
+        }
+        if (checkSelfPermission(Manifest.permission.CAMERA)
+                != PackageManager.PERMISSION_GRANTED) {
+            Toast.makeText(this, R.string.cam_perm_denied, Toast.LENGTH_LONG).show();
+            return;
+        }
+        try {
+            CameraStreamer.CameraInfo info = CameraStreamer.findCamera(this, facing);
+            if (info == null) {
+                Toast.makeText(this, getString(R.string.cam_no_camera, facing),
+                        Toast.LENGTH_LONG).show();
+                return;
+            }
+            int[] wh = CameraStreamer.chooseSize(this, info.id);
+            int fps = CameraStreamer.chooseFps(this, info.id);
+            int rotation = CameraStreamer.computeRotation(this, info);
+            camPendW = wh[0];
+            camPendH = wh[1];
+            camPendFps = fps;
+            camPendFacing = facing;
+            camPendRotation = rotation;
+            camPendMirror = "front".equals(facing);
+        } catch (Exception e) {
+            String m = e.getMessage();
+            Toast.makeText(this, getString(R.string.cam_init_failed,
+                    m == null ? "?" : m), Toast.LENGTH_LONG).show();
+            return;
+        }
+        cameraPendingStart = true;
+        updateCamIndicator();
+        c.sendCameraStart(camPendW, camPendH, camPendFps, camPendFacing,
+                camPendRotation, camPendMirror);
+        ui.postDelayed(cameraStartTimeout, 10000);
+        Toast.makeText(this, R.string.cam_starting, Toast.LENGTH_SHORT).show();
+    }
+
+    private final Runnable cameraStartTimeout = new Runnable() {
+        @Override public void run() {
+            if (cameraPendingStart) {
+                cameraPendingStart = false;
+                updateCamIndicator();
+                Toast.makeText(SessionActivity.this, R.string.cam_no_response,
+                        Toast.LENGTH_LONG).show();
+            }
+        }
+    };
+
+    /** Host accepted: begin local capture and stream access units. */
+    private void beginCapture() {
+        camQueue.clear();
+        camDropped.set(0);
+        camSending.set(true);
+        camSenderThread = new Thread(new Runnable() {
+            @Override public void run() {
+                try {
+                    while (camSending.get() || !camQueue.isEmpty()) {
+                        byte[] au = camQueue.poll(200, TimeUnit.MILLISECONDS);
+                        RemoteClient c = client;
+                        if (au != null && c != null) c.sendCameraFrame(au);
+                    }
+                } catch (InterruptedException ignored) {
+                }
+            }
+        }, "CamNetSender");
+        camSenderThread.setDaemon(true);
+        camSenderThread.start();
+
+        cameraStreamer.start(this, camPendFacing,
+                new CameraStreamer.FrameSink() {
+                    @Override public void onAccessUnit(byte[] data) {
+                        // bounded handoff: drop-oldest, memory never grows
+                        if (!camQueue.offer(data)) {
+                            camQueue.poll();
+                            camQueue.offer(data);
+                            camDropped.incrementAndGet();
+                        }
+                    }
+                },
+                new CameraStreamer.Callback() {
+                    @Override public void onStarted(int w, int h, int fps,
+                                                   String facing) {
+                        ui.post(() -> {
+                            updateCamIndicator();
+                            Toast.makeText(SessionActivity.this,
+                                    R.string.cam_streaming, Toast.LENGTH_SHORT)
+                                    .show();
+                        });
+                    }
+                    @Override public void onError(final String reason) {
+                        ui.post(() -> stopCamera(
+                                getString(R.string.cam_error, reason)));
+                    }
+                    @Override public void onStopped() {
+                        ui.post(() -> updateCamIndicator());
+                    }
+                });
+    }
+
+    /**
+     * Stops everything: local capture first (no more frames are produced),
+     * then the sender, then CAMERA_STOP to the host. Never auto-restarts.
+     */
+    private void stopCamera(String reason) {
+        cameraPendingStart = false;
+        ui.removeCallbacks(cameraStartTimeout);
+        camSending.set(false);
+        Thread t = camSenderThread;
+        camSenderThread = null;
+        if (t != null) t.interrupt(); // daemon: exits on interrupt
+        camQueue.clear();
+        if (cameraStreamer != null) cameraStreamer.stop();
+        RemoteClient c = client;
+        if (c != null) c.sendCameraStop();
+        updateCamIndicator();
+        if (reason != null) {
+            Toast.makeText(this, reason, Toast.LENGTH_LONG).show();
+        }
+    }
+
+    private void switchCamera() {
+        String other = "front".equals(camPendFacing) ? "rear" : "front";
+        stopCamera(null);
+        ui.postDelayed(() -> startCameraFlow(other), 400);
+    }
+
+    private void updateCamIndicator() {
+        ui.post(() -> {
+            if (cameraStreamer != null && cameraStreamer.isStreaming()) {
+                camStatusText.setText(getString(R.string.cam_indicator_active,
+                        "front".equals(cameraStreamer.getFacing())
+                                ? getString(R.string.cam_front)
+                                : getString(R.string.cam_rear)));
+                camIndicator.setVisibility(View.VISIBLE);
+            } else if (cameraPendingStart) {
+                camStatusText.setText(R.string.cam_indicator_starting);
+                camIndicator.setVisibility(View.VISIBLE);
+            } else {
+                camIndicator.setVisibility(View.GONE);
+            }
+        });
+    }
+
+    @Override
+    public void onCameraStatus(final String json) {
+        ui.post(() -> {
+            CameraProtocol.Status st;
+            try {
+                st = CameraProtocol.parseStatus(json);
+            } catch (IllegalArgumentException e) {
+                return; // malformed status: ignore, never tear down on garbage
+            }
+            if (cameraPendingStart) {
+                cameraPendingStart = false;
+                ui.removeCallbacks(cameraStartTimeout);
+                if (st.active) {
+                    beginCapture();
+                } else {
+                    updateCamIndicator();
+                    Toast.makeText(SessionActivity.this,
+                            getString(R.string.cam_error,
+                                    st.error == null ? "?" : st.error),
+                            Toast.LENGTH_LONG).show();
+                }
+            } else if (cameraStreamer.isStreaming() && !st.active) {
+                // host stopped or failed mid-stream (incl. permission revoked)
+                stopCamera(st.error == null ? null
+                        : getString(R.string.cam_error, st.error));
+            }
+        });
+    }
+
+    @Override
+    public void onCameraStopReceived() {
+        ui.post(() -> {
+            if (cameraStreamer.isStreaming() || cameraPendingStart) {
+                stopCamera(getString(R.string.cam_stopped_by_host));
+            }
+        });
+    }
+
     // ---- keyboard toolbar ---------------------------------------------------
 
     private Button keyBtn(String label, View.OnClickListener l) {
@@ -955,6 +1264,7 @@ public class SessionActivity extends Activity
     }
 
     private void disconnectAndFinish() {
+        if (cameraStreamer.isStreaming() || cameraPendingStart) stopCamera(null);
         if (recorder != null) stopRecording();
         if (client != null) {
             client.sendDisconnect();
@@ -1020,6 +1330,11 @@ public class SessionActivity extends Activity
 
     @Override
     public void onDisconnected(final boolean willRetry, final String reason) {
+        // Privacy: the camera NEVER survives a disconnect and never
+        // auto-resumes. The user must explicitly tap Start Camera again.
+        if (cameraStreamer.isStreaming() || cameraPendingStart) {
+            stopCamera(null);
+        }
         if (willRetry) {
             connected = false;
             showStatus(getString(R.string.reconnecting), true);
@@ -1208,9 +1523,23 @@ public class SessionActivity extends Activity
     }
 
     @Override
+    protected void onResume() {
+        super.onResume();
+        // Permission revoked while away (e.g. one-time grant expired):
+        // stop immediately, never keep streaming without the grant.
+        if (cameraStreamer.isStreaming()
+                && checkSelfPermission(Manifest.permission.CAMERA)
+                != PackageManager.PERMISSION_GRANTED) {
+            stopCamera(getString(R.string.cam_perm_revoked));
+        }
+    }
+
+    @Override
     protected void onDestroy() {
         ui.removeCallbacks(timeoutFire);
         ui.removeCallbacks(recTicker);
+        ui.removeCallbacks(cameraStartTimeout);
+        if (cameraStreamer.isStreaming() || cameraPendingStart) stopCamera(null);
         if (recorder != null) {
             try { recorder.stop(); } catch (Exception ignored) {}
             recorder = null;
