@@ -41,6 +41,10 @@ ASSUME_YES=0
 DRY_RUN=0
 NO_SYSTEMD=0
 DO_UNINSTALL=0
+# The host runs as the REAL user (the person who ran sudo), not a separate
+# service account. One user for the entire system: the desktop owner.
+# SUDO_USER is set when run via sudo; fall back to logname, then yourremote.
+SERVICE_USER="${SUDO_USER:-$(logname 2>/dev/null || echo yourremote)}"
 
 usage() {
     cat <<'EOF'
@@ -302,15 +306,15 @@ setup_password() {
         log "no password set yet — prompting (input hidden)"
         run remote-set-password || die "remote-set-password failed"
     fi
-    # The host service runs as yourremote; a root-owned host.conf (written
+    # The host service runs as $SERVICE_USER; a root-owned host.conf (written
     # by older installers) is unreadable to it — repair ownership.
     [ "$DRY_RUN" = 1 ] || fix_host_conf_ownership
 }
 
 fix_host_conf_ownership() {
-    if [ "$(id -u)" = 0 ] && id yourremote >/dev/null 2>&1 \
+    if [ "$(id -u)" = 0 ] && id "$SERVICE_USER" >/dev/null 2>&1 \
         && [ -f "$HOST_CONF" ]; then
-        chown yourremote:yourremote "$HOST_CONF" 2>/dev/null || true
+        chown "$SERVICE_USER:$SERVICE_USER" "$HOST_CONF" 2>/dev/null || true
         chmod 600 "$HOST_CONF" 2>/dev/null || true
     fi
 }
@@ -322,6 +326,13 @@ setup_service() {
         echo "Start the host manually with:  remote-host   (as your desktop user, inside the graphical session)"
         return 0
     fi
+    # One user for the whole system: the host's data dirs belong to the
+    # real user, not the yourremote service account.
+    if [ "$DRY_RUN" = 0 ] && [ "$(id -u)" = 0 ]; then
+        mkdir -p /etc/remote /var/log/remote /var/lib/remote/files
+        chown "$SERVICE_USER:$SERVICE_USER" /etc/remote /var/log/remote \
+            /var/lib/remote /var/lib/remote/files 2>/dev/null || true
+    fi
     if [ ! -d /run/systemd/system ]; then
         warn "systemd is not running as PID 1 (container?) — starting remote-host directly in the background."
         warn "It will NOT auto-start on boot; add it to the container's startup."
@@ -329,6 +340,17 @@ setup_service() {
         return 0
     fi
     log "enabling + starting remote-host"
+    # Run as the real user (one user for the whole system), not the
+    # yourremote service account, via a systemd override drop-in.
+    if [ "$DRY_RUN" = 0 ]; then
+        mkdir -p /etc/systemd/system/remote-host.service.d
+        cat > /etc/systemd/system/remote-host.service.d/user.conf <<EOF
+[Service]
+User=$SERVICE_USER
+Group=$SERVICE_USER
+EOF
+        systemctl daemon-reload 2>/dev/null || true
+    fi
     if [ "$DEB_UPGRADED" = 1 ]; then
         run systemctl restart remote-host \
             || die "systemctl restart failed. Fix: systemctl status remote-host; journalctl -u remote-host -n 50"
@@ -347,7 +369,7 @@ setup_service() {
 }
 
 start_host_nosystemd() {
-    # remote-host listens on TCP 47800 (>1024): runs as the yourremote user.
+    # remote-host listens on TCP 47800 (>1024): runs as $SERVICE_USER.
     # sd_notify is a no-op without NOTIFY_SOCKET, so a plain background
     # start is safe.
     if pgrep -f "[r]emote-host" >/dev/null 2>&1; then
@@ -363,7 +385,7 @@ start_host_nosystemd() {
     have runuser || die "need 'runuser' to start remote-host without systemd"
     [ "$DRY_RUN" = 1 ] && { echo "[dry-run] + start remote-host directly (no systemd)" >&2; return 0; }
     # Screen capture / input injection need the desktop session's DISPLAY
-    # and X cookie. As root we copy the cookie to a yourremote-owned file.
+    # and X cookie. As root we copy the cookie to a $SERVICE_USER-owned file.
     local xenv="" sess=""
     if sess="$(detect_desktop_session)"; then
         local xuser="${sess%%|*}" rest="${sess#*|}"
@@ -373,7 +395,7 @@ start_host_nosystemd() {
         if [ -n "$xauth" ]; then
             cp -f "$xauth" /etc/remote/xauthority \
                 || die "could not copy X authority cookie from $xauth"
-            chown yourremote:yourremote /etc/remote/xauthority
+            chown "$SERVICE_USER:$SERVICE_USER" /etc/remote/xauthority
             chmod 600 /etc/remote/xauthority
             xenv="$xenv XAUTHORITY=/etc/remote/xauthority"
         else
@@ -382,13 +404,13 @@ start_host_nosystemd() {
     else
         warn "no desktop X session detected — remote-host needs a display for screen capture."
     fi
-    log "starting remote-host in the background as user yourremote"
+    log "starting remote-host in the background as user $SERVICE_USER"
     if [ -n "$xenv" ]; then
         # shellcheck disable=SC2086
-        nohup env $xenv runuser -u yourremote -- /usr/bin/remote-host \
+        nohup env $xenv runuser -u "$SERVICE_USER" -- /usr/bin/remote-host \
             >>/var/log/remote/host-stdout.log 2>&1 &
     else
-        nohup runuser -u yourremote -- /usr/bin/remote-host \
+        nohup runuser -u "$SERVICE_USER" -- /usr/bin/remote-host \
             >>/var/log/remote/host-stdout.log 2>&1 &
     fi
     sleep 3
