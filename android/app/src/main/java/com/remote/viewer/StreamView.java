@@ -153,6 +153,12 @@ public class StreamView extends View {
                 int[] p = controlMode == MODE_TOUCH
                         ? toHost(e.getX(), e.getY())
                         : cursorInt();
+                if (controlMode == MODE_TOUCH) {
+                    // keep the virtual cursor in sync so switching to
+                    // mouse/trackpad mode (or the L/R buttons) doesn't
+                    // jump to the screen center.
+                    moveCursorTo(p[0], p[1]);
+                }
                 if (controlMode == MODE_TRACKPAD) listener.onMove(p[0], p[1]);
                 listener.onTap(p[0], p[1]);
                 return true;
@@ -165,6 +171,7 @@ public class StreamView extends View {
                 int[] p = controlMode == MODE_TOUCH
                         ? toHost(e.getX(), e.getY())
                         : cursorInt();
+                if (controlMode == MODE_TOUCH) moveCursorTo(p[0], p[1]);
                 if (controlMode != MODE_TOUCH) listener.onMove(p[0], p[1]);
                 listener.onRightClick(p[0], p[1]);
             }
@@ -441,6 +448,7 @@ public class StreamView extends View {
                     int[] p = controlMode == MODE_TOUCH
                             ? toHost(e.getX(e.getActionIndex()), e.getY(e.getActionIndex()))
                             : cursorInt();
+                    if (controlMode == MODE_TOUCH) moveCursorTo(p[0], p[1]);
                     listener.onRightClick(p[0], p[1]);
                 }
                 twoFinger = false;
@@ -462,6 +470,7 @@ public class StreamView extends View {
             panLastY = e.getY();
             if (!zoomed && controlMode == MODE_TOUCH && hostW > 0) {
                 int[] p = toHost(e.getX(), e.getY());
+                moveCursorTo(p[0], p[1]);
                 listener.onMove(p[0], p[1]);
             }
         } else if (action == MotionEvent.ACTION_MOVE) {
@@ -477,6 +486,7 @@ public class StreamView extends View {
                 lastMoveSent = now;
                 if (controlMode == MODE_TOUCH) {
                     int[] p = toHost(e.getX(), e.getY());
+                    moveCursorTo(p[0], p[1]);
                     listener.onMove(p[0], p[1]);
                 } else {
                     // trackpad / mouse: relative cursor movement
