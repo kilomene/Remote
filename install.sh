@@ -285,18 +285,27 @@ setup_password() {
         run_display "REMOTE_PASSWORD=<redacted> remote-set-password" \
             env REMOTE_PASSWORD="$PASSWORD" remote-set-password \
             || die "remote-set-password failed"
-        return 0
-    fi
-    if [ -f "$HOST_CONF" ]; then
+    elif [ -f "$HOST_CONF" ]; then
         log "password already set ($HOST_CONF exists) — keeping it"
-        return 0
+    else
+        if [ "$ASSUME_YES" = 1 ] || [ "$DRY_RUN" = 1 ] || [ ! -t 0 ]; then
+            [ "$DRY_RUN" = 1 ] && { echo "[dry-run] + remote-set-password (interactive prompt)" >&2; return 0; }
+            die "no password provided and running non-interactively. Fix: set REMOTE_PASSWORD env var (or --password) and re-run."
+        fi
+        log "no password set yet — prompting (input hidden)"
+        run remote-set-password || die "remote-set-password failed"
     fi
-    if [ "$ASSUME_YES" = 1 ] || [ "$DRY_RUN" = 1 ] || [ ! -t 0 ]; then
-        [ "$DRY_RUN" = 1 ] && { echo "[dry-run] + remote-set-password (interactive prompt)" >&2; return 0; }
-        die "no password provided and running non-interactively. Fix: set REMOTE_PASSWORD env var (or --password) and re-run."
+    # The host service runs as yourremote; a root-owned host.conf (written
+    # by older installers) is unreadable to it — repair ownership.
+    [ "$DRY_RUN" = 1 ] || fix_host_conf_ownership
+}
+
+fix_host_conf_ownership() {
+    if [ "$(id -u)" = 0 ] && id yourremote >/dev/null 2>&1 \
+        && [ -f "$HOST_CONF" ]; then
+        chown yourremote:yourremote "$HOST_CONF" 2>/dev/null || true
+        chmod 600 "$HOST_CONF" 2>/dev/null || true
     fi
-    log "no password set yet — prompting (input hidden)"
-    run remote-set-password || die "remote-set-password failed"
 }
 
 # ---- step 5: service (systemd, or direct background start) ------------------------
@@ -335,16 +344,56 @@ start_host_nosystemd() {
     fi
     have runuser || die "need 'runuser' to start remote-host without systemd"
     [ "$DRY_RUN" = 1 ] && { echo "[dry-run] + start remote-host directly (no systemd)" >&2; return 0; }
+    # Screen capture / input injection need the desktop session's DISPLAY
+    # and X cookie. As root we copy the cookie to a yourremote-owned file.
+    local xenv="" sess=""
+    if sess="$(detect_desktop_session)"; then
+        local xuser="${sess%%|*}" rest="${sess#*|}"
+        local display="${rest%%|*}" xauth="${rest#*|}"
+        log "desktop session: user=$xuser display=$display"
+        cp -f "$xauth" /etc/remote/xauthority \
+            || die "could not copy X authority cookie from $xauth"
+        chown yourremote:yourremote /etc/remote/xauthority
+        chmod 600 /etc/remote/xauthority
+        xenv="DISPLAY=$display XAUTHORITY=/etc/remote/xauthority"
+    else
+        warn "no desktop X session detected — remote-host needs a display for screen capture."
+    fi
     log "starting remote-host in the background as user yourremote"
-    # shellcheck disable=SC2086
-    nohup runuser -u yourremote -- /usr/bin/remote-host \
-        >>/var/log/remote/host-stdout.log 2>&1 &
+    if [ -n "$xenv" ]; then
+        # shellcheck disable=SC2086
+        nohup env $xenv runuser -u yourremote -- /usr/bin/remote-host \
+            >>/var/log/remote/host-stdout.log 2>&1 &
+    else
+        nohup runuser -u yourremote -- /usr/bin/remote-host \
+            >>/var/log/remote/host-stdout.log 2>&1 &
+    fi
     sleep 3
     if pgrep -f "[r]emote-host" >/dev/null 2>&1; then
         log "remote-host running (pid $(pgrep -f '[r]emote-host' | head -n1))"
     else
         die "remote-host did not stay up. Fix: see /var/log/remote/host-stdout.log and /var/log/remote/"
     fi
+}
+
+# Prints "user|display|xauthority" for the graphical X session, or nothing.
+detect_desktop_session() {
+    local xpid xuser xauth display sock
+    xpid="$(pgrep -o -x Xorg 2>/dev/null || pgrep -o -x Xwayland 2>/dev/null || true)"
+    [ -n "$xpid" ] || return 1
+    xuser="$(ps -o user= -p "$xpid" 2>/dev/null | tr -d '[:space:]')"
+    [ -n "$xuser" ] || return 1
+    display=""
+    for sock in /tmp/.X11-unix/X*; do
+        if [ -S "$sock" ]; then display=":${sock##*/X}"; break; fi
+    done
+    [ -n "$display" ] || display=":0"
+    xauth="$(tr '\0' '\n' < "/proc/$xpid/environ" 2>/dev/null | grep '^XAUTHORITY=' | cut -d= -f2-)"
+    if [ -z "$xauth" ]; then
+        xauth="$(getent passwd "$xuser" 2>/dev/null | cut -d: -f6)/.Xauthority"
+    fi
+    [ -n "$xauth" ] && [ -f "$xauth" ] || return 1
+    printf '%s|%s|%s' "$xuser" "$display" "$xauth"
 }
 
 # ---- step 6: summary ---------------------------------------------------------------
