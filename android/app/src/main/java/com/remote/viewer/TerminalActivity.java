@@ -141,7 +141,7 @@ public class TerminalActivity extends Activity {
     private void openTab() {
         final Tab tab = new Tab();
         tab.view = new TerminalView(this);
-        tab.view.setFontSizeSp(Prefs.getInt(this, Prefs.K_TERM_FONT, 14));
+        tab.view.setFontSizeSp(Prefs.getInt(this, Prefs.K_TERM_FONT, 12));
         tab.view.setVisibility(View.GONE);
         tab.view.setInputSink(data -> {
             if (tab.sessionId != null && term != null) {
