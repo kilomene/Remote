@@ -210,6 +210,31 @@ def t_network_wizard_help_and_steps():
     assert isinstance(netsetup.check_tailscale_installed(), bool)
 
 
+def t_network_wizard_distro_flavor():
+    # regression: a Debian 13 ('trixie') host must use the debian apt tree,
+    # not ubuntu (live 404: pkgs.tailscale.com/stable/ubuntu/trixie.noarch.gpg)
+    import tempfile
+    cases = [
+        ('ID=debian\nVERSION_CODENAME=trixie\n', "debian"),
+        ('ID=ubuntu\nVERSION_CODENAME=noble\n', "ubuntu"),
+        ('ID=linuxmint\nID_LIKE=ubuntu\n', "ubuntu"),
+        ('ID=raspbian\nID_LIKE=debian\n', "debian"),
+        ('ID=kali\nID_LIKE=debian\n', "debian"),
+    ]
+    for content, want in cases:
+        with tempfile.NamedTemporaryFile("w", suffix=".os-release",
+                                         delete=False) as f:
+            f.write(content)
+            path = f.name
+        try:
+            got = netsetup.distro_repo_flavor(path)
+        finally:
+            os.unlink(path)
+        assert got == want, "os-release %r -> %r, want %r" % (content, got, want)
+    # missing file: safe default (ubuntu tree covers most derivatives)
+    assert netsetup.distro_repo_flavor("/nonexistent/os-release") == "ubuntu"
+
+
 # ---------------------------------------------------------------- deb build
 def t_deb_build_contents():
     build = os.path.join(ROOT, "packaging", "deb", "build-deb.sh")
@@ -261,6 +286,7 @@ def main():
     check("tray headless no-op", t_tray_headless_noop)
     check("settings input validation", t_settings_validation)
     check("network wizard --help + steps", t_network_wizard_help_and_steps)
+    check("network wizard distro flavor", t_network_wizard_distro_flavor)
     check("deb build contents", t_deb_build_contents)
     if FAILURES:
         print("\n%d FAILURES" % len(FAILURES))
