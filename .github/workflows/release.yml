@@ -33,5 +33,6 @@ jobs:
           gh release create "$GITHUB_REF_NAME" \
             out/remote_*_all.deb \
             out/remote-viewer.apk \
+            install.sh \
             --title "$GITHUB_REF_NAME" \
             --generate-notes
