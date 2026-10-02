@@ -14,6 +14,8 @@ Real, step-by-step setup -- nothing is faked:
 
 Every step checks real return codes; any failure aborts with a clear
 message. Flags: --headscale <url> (self-hosted control plane),
+--authkey <key> (headless `tailscale up --authkey`; also read from the
+TS_AUTHKEY environment variable; the key is never printed or logged),
 --check-only (just report state, change nothing).
 
 Installed as /usr/bin/yourremote-network-setup.
@@ -124,16 +126,22 @@ def install_tailscale(codename=None):
 # --------------------------------------------------------------------------
 # Step 3: tailscale up (prints the auth URL)
 # --------------------------------------------------------------------------
-def tailscale_up(headscale_url=None):
+def tailscale_up(headscale_url=None, authkey=None):
     """Run `tailscale up`; print the auth URL; return it (or None).
 
     Returns the URL string when one was emitted, else None (already logged
     in or key-based auth). Raises WizardError when `tailscale up` fails.
+
+    authkey enables fully headless operation (tailscale up --authkey=...);
+    it is NEVER printed or logged.
     """
     argv = ["tailscale", "up"]
     if headscale_url:
         argv += ["--login-server", headscale_url]
-    print("  $ %s" % " ".join(argv))
+    if authkey:
+        argv += ["--authkey", authkey]
+    shown = ["<redacted>" if (authkey and a == authkey) else a for a in argv]
+    print("  $ %s" % " ".join(shown))
     rc, out, err = run(argv, timeout=300)
     combined = (out or "") + "\n" + (err or "")
     if rc != 0:
@@ -193,6 +201,10 @@ def main():
         description="first-run Tailscale setup wizard for the Remote host")
     ap.add_argument("--headscale", metavar="URL", default=None,
                     help="use a self-hosted Headscale control plane")
+    ap.add_argument("--authkey", metavar="KEY",
+                    default=os.environ.get("TS_AUTHKEY"),
+                    help="headless Tailscale auth key (or TS_AUTHKEY env); "
+                         "never printed or logged")
     ap.add_argument("--check-only", action="store_true",
                     help="report Tailscale state without changing anything")
     ap.add_argument("--yes", action="store_true",
@@ -225,9 +237,18 @@ def main():
             print("step 2/4: already installed, skipping.")
 
         print("step 3/4: tailscale up...")
-        url = tailscale_up(headscale_url=args.headscale)
+        url = tailscale_up(headscale_url=args.headscale, authkey=args.authkey)
         if url and not args.yes:
-            input("Press Enter after opening the URL and logging in...")
+            try:
+                input("Press Enter after opening the URL and logging in...")
+            except EOFError:
+                # piped stdin (e.g. curl ... | install.sh): no prompt can be
+                # answered; `tailscale up` already waited for the browser
+                # login itself, so just continue to verification.
+                pass
+            except KeyboardInterrupt:
+                print()
+                return 1
 
         print("step 4/4: verifying...")
         ip = verify_tailscale()
