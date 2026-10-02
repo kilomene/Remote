@@ -244,6 +244,55 @@ WantedBy=multi-user.target
 """
 
 
+def have_systemd():
+    """True when systemd runs as PID 1 (canonical /run/systemd/system check)."""
+    return os.path.isdir("/run/systemd/system")
+
+
+def tailscaled_responding():
+    """True when a tailscaled answers on the default socket (even logged-out).
+
+    `tailscale status` exits non-zero when not logged in, but only says
+    "failed to connect to local tailscaled" when no daemon is listening.
+    """
+    rc, out, err = run(["tailscale", "status"], timeout=15)
+    combined = (out or "") + (err or "")
+    return "failed to connect to local tailscaled" not in combined
+
+
+def start_tailscaled_nosystemd():
+    """Start tailscaled as a plain background daemon (no systemd as PID 1).
+
+    For containers / WSL-style hosts. The daemon will NOT restart on boot;
+    that limitation is printed loudly.
+    """
+    for d in ("/var/lib/tailscale", "/run/tailscale", "/var/log/tailscale"):
+        os.makedirs(d, exist_ok=True)
+    if not tailscaled_responding():
+        logf = "/var/log/tailscale/tailscaled.log"
+        lf = open(logf, "ab")
+        subprocess.Popen(
+            ["/usr/local/bin/tailscaled",
+             "--state=/var/lib/tailscale/tailscaled.state",
+             "--socket=/run/tailscale/tailscaled.sock",
+             "--port=41641"],
+            stdout=lf, stderr=subprocess.STDOUT,
+            stdin=subprocess.DEVNULL, start_new_session=True,
+            close_fds=True)
+        print("  $ (background) tailscaled --state=/var/lib/tailscale/"
+              "tailscaled.state --socket=/run/tailscale/tailscaled.sock "
+              "--port=41641")
+        for _ in range(25):
+            time.sleep(1)
+            if tailscaled_responding():
+                break
+        else:
+            raise WizardError("tailscaled did not come up; see %s" % logf)
+    print("  ok: tailscaled running without systemd "
+          "(it will NOT auto-start on boot — add it to the container's "
+          "startup or re-run the wizard)")
+
+
 def install_tailscale_static():
     """Install Tailscale from the official static binaries. Needs root.
 
@@ -294,21 +343,26 @@ def install_tailscale_static():
             shutil.copy2(srcbin, "/usr/local/bin/" + name)
             os.chmod("/usr/local/bin/" + name, 0o755)
         print("  ok: installed tailscale/tailscaled to /usr/local/bin")
-        unit_path = "/etc/systemd/system/tailscaled.service"
-        try:
-            with open(unit_path, "w") as f:
-                f.write(tailscaled_unit())
-        except OSError as e:
-            raise WizardError("cannot write systemd unit: %s" % e)
-        for argv in (["systemctl", "daemon-reload"],
-                     ["systemctl", "enable", "--now", "tailscaled"]):
-            print("  $ %s" % " ".join(argv))
-            rc, out, err = run(argv, timeout=120)
-            if rc != 0:
-                raise WizardError("FAILED [%s] (exit %d):\n%s"
-                                  % (" ".join(argv), rc,
-                                     (err or out).strip()[-2000:]))
-            print("  ok: %s" % " ".join(argv[1:]))
+        if have_systemd():
+            unit_path = "/etc/systemd/system/tailscaled.service"
+            try:
+                with open(unit_path, "w") as f:
+                    f.write(tailscaled_unit())
+            except OSError as e:
+                raise WizardError("cannot write systemd unit: %s" % e)
+            for argv in (["systemctl", "daemon-reload"],
+                         ["systemctl", "enable", "--now", "tailscaled"]):
+                print("  $ %s" % " ".join(argv))
+                rc, out, err = run(argv, timeout=120)
+                if rc != 0:
+                    raise WizardError("FAILED [%s] (exit %d):\n%s"
+                                      % (" ".join(argv), rc,
+                                         (err or out).strip()[-2000:]))
+                print("  ok: %s" % " ".join(argv[1:]))
+        else:
+            # container / WSL-style host: no systemd to manage the daemon
+            print("  no systemd as PID 1 — starting tailscaled directly")
+            start_tailscaled_nosystemd()
     finally:
         shutil.rmtree(tmpd, ignore_errors=True)
     # A broken repo list from a failed/manual repo attempt would poison
