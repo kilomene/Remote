@@ -14,6 +14,8 @@ import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 
+import org.json.JSONObject;
+
 import javax.crypto.Mac;
 import javax.crypto.SecretKeyFactory;
 import javax.crypto.spec.PBEKeySpec;
@@ -135,6 +137,12 @@ public final class RemoteProto {
         AuthException(String m) { super(m); }
     }
 
+    /** The host's policy demands pairing before password auth.
+     *  The UI should prompt for the pairing code and reconnect with it. */
+    public static class PairingRequiredException extends AuthException {
+        PairingRequiredException(String m) { super(m); }
+    }
+
     private RemoteProto() {}
 
     public static void sendMsg(OutputStream out, int type, byte[] payload) throws IOException {
@@ -177,11 +185,41 @@ public final class RemoteProto {
     }
 
     /**
+     * Builds the PAIR_REQUEST (0x77) JSON payload. Key order is fixed
+     * (code, device_id, device_name, platform) and is asserted byte-exact
+     * by tests/proto_v4_pair_client.py.
+     */
+    public static String buildPairRequestJson(String code, String deviceId,
+                                              String deviceName) {
+        try {
+            JSONObject o = new JSONObject();
+            o.put("code", code);
+            o.put("device_id", deviceId == null ? "unknown" : deviceId);
+            o.put("device_name", deviceName == null ? "" : deviceName);
+            o.put("platform", "android");
+            return o.toString();
+        } catch (Exception e) {
+            return "{\"code\":\"\",\"device_id\":\"unknown\","
+                    + "\"device_name\":\"\",\"platform\":\"android\"}";
+        }
+    }
+
+    /**
      * Connects and runs the client side of the auth handshake. Returns the socket.
      * When {@code ctx} is non-null, a v2 DEVICE_HELLO is sent immediately after
      * TCP connect and before auth (see PROTOCOL.md); a null ctx skips it.
+     * When {@code pairCode} is non-empty, a PAIR_REQUEST is sent in the
+     * pre-auth pairing window and its PAIR_RESULT must be ok.
+     * Throws PairingRequiredException when the host's policy demands pairing
+     * and no (valid) code was supplied.
      */
     public static Socket connect(String host, int port, String password,
+                                 android.content.Context ctx) throws Exception {
+        return connect(host, port, password, null, ctx);
+    }
+
+    public static Socket connect(String host, int port, String password,
+                                 String pairCode,
                                  android.content.Context ctx) throws Exception {
         Socket s = new Socket();
         s.connect(new InetSocketAddress(host, port), 10000);
@@ -193,6 +231,43 @@ public final class RemoteProto {
             InputStream in = s.getInputStream();
             OutputStream out = s.getOutputStream();
             Msg m = recvMsg(in);
+            if (pairCode != null && !pairCode.isEmpty()) {
+                String deviceId = null, deviceName = null;
+                if (ctx != null) {
+                    try {
+                        JSONObject hello = new JSONObject(DeviceHello.buildJson(ctx));
+                        deviceId = hello.optString("device_id", "unknown");
+                        deviceName = hello.optString("device_name", "");
+                    } catch (Exception ignored) {
+                    }
+                }
+                sendMsg(out, PAIR_REQUEST,
+                        buildPairRequestJson(pairCode, deviceId, deviceName)
+                                .getBytes(StandardCharsets.UTF_8));
+                m = recvMsg(in);
+                if (m.type != PAIR_RESULT) {
+                    throw new AuthException("unexpected reply 0x"
+                            + Integer.toHexString(m.type) + " to pairing request");
+                }
+                boolean ok = false;
+                String detail = "";
+                try {
+                    JSONObject r = new JSONObject(
+                            new String(m.payload, StandardCharsets.UTF_8));
+                    ok = r.optBoolean("ok", false);
+                    detail = r.optString("detail", "");
+                } catch (Exception ignored) {
+                }
+                if (!ok) {
+                    throw new AuthException("pairing rejected"
+                            + (detail.isEmpty() ? "" : ": " + detail));
+                }
+                m = recvMsg(in);
+            }
+            if (m.type == PAIR_REQUIRED) {
+                throw new PairingRequiredException(
+                        "this host requires pairing before sign-in");
+            }
             if (m.type == AUTH_FAIL) {
                 throw new AuthException("server refused: " + new String(m.payload, StandardCharsets.UTF_8));
             }
