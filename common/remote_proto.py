@@ -1,4 +1,4 @@
-"""Shared wire protocol for Remote v3.
+"""Shared wire protocol for Remote v4.
 
 Remote is an AnyDesk-style remote desktop for Linux. Transport runs over
 Tailscale (WireGuard-encrypted P2P); this protocol adds password auth,
@@ -15,8 +15,8 @@ import socket
 import struct
 
 PORT = 47800
-PROTOCOL_VERSION = 3
-PROTOCOL_ID = b"REMOTE/3"  # v1 hosts send b"REMOTE/1"; clients accept any REMOTE/N
+PROTOCOL_VERSION = 4
+PROTOCOL_ID = b"REMOTE/4"  # v1 hosts send b"REMOTE/1"; clients accept any REMOTE/N
 
 # Message types: server -> client
 AUTH_REQ = 0x01  # payload: salt(16) || nonce(32)
@@ -57,6 +57,7 @@ TERMINAL_OPEN = 0x61    # c->s: UTF-8 JSON {cols, rows}
 TERMINAL_OPENED = 0x61  # s->c: UTF-8 JSON {session}
 TERMINAL_DATA = 0x62    # either: UTF-8 JSON {session, data: base64(raw pty bytes)}
 TERMINAL_CLOSE = 0x63   # either: UTF-8 JSON {session}
+TERMINAL_RESIZE = 0x69  # v4: c->s: UTF-8 JSON {session, cols, rows} (fills v3 spare slot)
 # session chat (0x64)
 CHAT_MSG = 0x64  # either: UTF-8 JSON {from, text, ts}
 # agent / automation status (0x65-0x66)
@@ -77,13 +78,57 @@ PERMS_DENIED = 0x82     # s->c: JSON {op, reason}
 PERMS_LIST = 0x83       # c->s: JSON {}
 PERMS_LIST_RESP = 0x84  # s->c: JSON {devices:[{device_id, device_name, platform, first_seen, last_seen, permissions}]}
 
-# The seven permission flags. Every device carries all seven (booleans).
+# The twelve permission flags. Every device carries all twelve (booleans).
+# remote_host.py's _valid_perms and DeviceStore._ensure_perms derive from
+# this tuple, so they extend automatically.
 PERMISSION_FLAGS = ("view", "mouse", "keyboard", "clipboard", "files",
-                    "terminal", "system")
+                    "terminal", "system", "audio", "webcam", "apps",
+                    "automation", "camera")
 
-# Reserved ranges (see PROTOCOL.md): 0x69-0x6E spare in the v3 block,
-# 0x70-0x7F audio (planned), 0x85-0x8F reserved (multi-user extensions),
-# 0x90-0x9F WebRTC/STUN/TURN, 0xC0-0xFE future.
+# --- v4 additions (v1/v2/v3 types above are byte-identical) ---
+# remote audio (0x70-0x73)
+AUDIO_START = 0x70  # c->s: UTF-8 JSON {source}
+AUDIO_DATA = 0x71   # s->c: raw audio bytes
+AUDIO_STOP = 0x72   # either: empty
+AUDIO_ERROR = 0x73  # s->c: UTF-8 JSON {detail}
+# webcam (0x74-0x75)
+WEBCAM_LIST = 0x74    # c->s: UTF-8 JSON {}; s->c: UTF-8 JSON {cameras:[{id, name}]}
+WEBCAM_FRAME = 0x75   # c->s: UTF-8 JSON {id}; s->c: JPEG bytes
+# tailscale net status (0x76); same type id, direction distinguishes
+NET_STATUS = 0x76  # c->s: UTF-8 JSON {}; s->c: UTF-8 JSON
+                   #   {online, tailscale_ip, peer_latency_ms, direct}
+# pairing approval (0x77-0x79), all sent pre-auth, after DEVICE_HELLO
+PAIR_REQUEST = 0x77   # c->s: UTF-8 JSON {code, device_id, device_name, platform}
+PAIR_RESULT = 0x78    # s->c: UTF-8 JSON {ok, detail?}
+PAIR_REQUIRED = 0x79  # s->c: UTF-8 JSON {device_id}; policy demands pairing
+# automation exec (0x7A-0x7B)
+EXEC_RUN = 0x7A     # c->s: UTF-8 JSON {name, args:[]}
+EXEC_RESULT = 0x7B  # s->c: UTF-8 JSON {name, ok, output, error?}
+# privacy policy toggles (0x7C); same type id, direction distinguishes
+POLICY_GET = 0x7C  # c->s: UTF-8 JSON {}; s->c: UTF-8 JSON {toggles}
+# 0x7D spare in the v4 policy block; 0x7E-0x7F reserved
+# session tokens (0x85-0x86), multi-user extension range
+SESSION_TOKEN = 0x85   # s->c: UTF-8 JSON {token, expires_in}, issued post-AUTH_OK
+SESSION_ROTATE = 0x86  # s->c: UTF-8 JSON {token, expires_in}, hourly rotation
+# camera for verification (0x87-0x8A; consumes the head of the old
+# 0x87-0x8F multi-user-extension reserve). See PROTOCOL.md and
+# host/camera_virtual.py. The Android capture side ships later; the host
+# side presents the phone's H264 camera stream as /dev/video0 via
+# v4l2loopback. Consent-gated, fail-closed under the "camera" permission.
+CAMERA_START = 0x87    # c->s: UTF-8 JSON {width, height, fps, facing:"front"|"rear"}
+CAMERA_STOP = 0x88     # either: empty
+CAMERA_FRAME = 0x89   # c->s: raw H264 Annex-B bytes, one access unit per
+                      #   message (<= 8 MiB, the global MAX_PAYLOAD cap)
+CAMERA_STATUS = 0x8A  # s->c: UTF-8 JSON {active, device, width, height,
+                      #   fps, error?}
+
+# Reserved ranges (see PROTOCOL.md): 0x60-0x6E v3 block (0x69 = TERMINAL_RESIZE),
+# 0x6F v3 SYSTEM_RESP, 0x70-0x7F v4: audio (0x70-0x73), webcam (0x74-0x75),
+#   net+pair (0x76-0x79), exec+policy (0x7A-0x7D), reserved 0x7E-0x7F,
+# 0x80-0x84 multi-user / permissions (used), 0x85-0x86 session tokens,
+# 0x87-0x8A camera for verification (used), 0x8B-0x8F reserved
+#   (multi-user extensions), 0x90-0x97 voice RTX (planned),
+# 0x98-0x9F reserved (was the WebRTC/STUN/TURN block), 0xC0-0xFE future.
 
 HEADER = struct.Struct(">BI")
 MAX_PAYLOAD = 8 * 1024 * 1024  # 8 MiB sanity cap
