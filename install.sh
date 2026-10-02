@@ -204,6 +204,12 @@ deb_installed_version() {
     dpkg-query -W -f='${Version}' remote 2>/dev/null || true
 }
 
+# Set to 1 when install_deb actually installs/upgrades the package, so
+# setup_service restarts the host to pick up the new code. (Seen live:
+# 1.2.13 host kept running after the 1.2.15 .deb was installed, so the
+# xlib/xclip/ffmpeg fixes never took effect.)
+DEB_UPGRADED=0
+
 install_deb() {
     local deb="$1" want_ver="$2"
     local installed deb_ver
@@ -233,6 +239,7 @@ install_deb() {
     [ -n "$(deb_installed_version)" ] || [ "$DRY_RUN" = 1 ] \
         || die "package did not end up installed. Fix: dpkg -l remote; apt-get install -f -y"
     [ "$DRY_RUN" = 1 ] || log "remote $(deb_installed_version) installed"
+    DEB_UPGRADED=1
 }
 
 # ---- step 2: tailscale (delegates to the wizard — no duplicated logic) ---------
@@ -322,8 +329,13 @@ setup_service() {
         return 0
     fi
     log "enabling + starting remote-host"
-    run systemctl enable --now remote-host \
-        || die "systemctl enable --now failed. Fix: systemctl status remote-host; journalctl -u remote-host -n 50"
+    if [ "$DEB_UPGRADED" = 1 ]; then
+        run systemctl restart remote-host \
+            || die "systemctl restart failed. Fix: systemctl status remote-host; journalctl -u remote-host -n 50"
+    else
+        run systemctl enable --now remote-host \
+            || die "systemctl enable --now failed. Fix: systemctl status remote-host; journalctl -u remote-host -n 50"
+    fi
     if [ "$DRY_RUN" = 1 ]; then return 0; fi
     if systemctl is-active --quiet remote-host; then
         log "remote-host is active"
@@ -339,8 +351,14 @@ start_host_nosystemd() {
     # sd_notify is a no-op without NOTIFY_SOCKET, so a plain background
     # start is safe.
     if pgrep -f "[r]emote-host" >/dev/null 2>&1; then
-        log "remote-host already running — leaving it alone"
-        return 0
+        if [ "$DEB_UPGRADED" = 1 ]; then
+            log "remote-host upgraded — restarting to pick up the new code"
+            pkill -f "[r]emote-host" || true
+            sleep 2
+        else
+            log "remote-host already running — leaving it alone"
+            return 0
+        fi
     fi
     have runuser || die "need 'runuser' to start remote-host without systemd"
     [ "$DRY_RUN" = 1 ] && { echo "[dry-run] + start remote-host directly (no systemd)" >&2; return 0; }
