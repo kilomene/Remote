@@ -19,6 +19,8 @@
 #     enforcement, PERMS_SET/PERMS_LIST)
 # 11. runs every v4 module conformance harness (capture, auth, media, sys,
 #     files, ops, camera, pair_client)
+# 12. runs the install.sh logic tests (stubbed privileged commands:
+#     arg parsing, step order, idempotency, dry-run, secret redaction)
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -254,6 +256,13 @@ if [ -n "$JAVAC_BIN" ]; then
 else
     echo "  skip: no javac available"
 fi
+
+echo "=== [12/12] install.sh logic tests (stubbed privileged commands) ==="
+bash tests/test_install.sh >"$TMP/install_test.log" 2>&1 \
+    || { tail -30 "$TMP/install_test.log"; fail "install.sh logic tests failed"; }
+grep -q "ALL INSTALL TESTS PASSED" "$TMP/install_test.log" \
+    || fail "install tests did not pass"
+pass "install.sh: arg parsing, step order, idempotency, dry-run, secrets redaction"
 
 echo
 echo "=============================="
