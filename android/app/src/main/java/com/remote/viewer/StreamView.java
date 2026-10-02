@@ -6,6 +6,7 @@ import android.graphics.BitmapFactory;
 import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.Paint;
+import android.graphics.Path;
 import android.graphics.Rect;
 import android.os.Handler;
 import android.os.Looper;
@@ -178,7 +179,9 @@ public class StreamView extends View {
 
             @Override
             public boolean onDoubleTap(MotionEvent e) {
-                resetZoom();
+                // Pinch-zoom must never snap back: double-tap no longer
+                // resets zoom (pinch end was triggering false double-taps).
+                // Zoom reset is on the toolbar button instead.
                 return true;
             }
         });
@@ -339,10 +342,26 @@ public class StreamView extends View {
                 && cursorInit) {
             float cx = offX + cursor[0] * totalScale;
             float cy = offY + cursor[1] * totalScale;
-            float r = 14 * getResources().getDisplayMetrics().density / 3f;
-            canvas.drawCircle(cx, cy, r, cursorPaint);
-            canvas.drawLine(cx - r * 1.6f, cy, cx + r * 1.6f, cy, cursorPaint);
-            canvas.drawLine(cx, cy - r * 1.6f, cx, cy + r * 1.6f, cursorPaint);
+            // Mouse pointer arrow (not a target): classic arrowhead shape.
+            float d = getResources().getDisplayMetrics().density;
+            float s = 12 * d; // arrow size
+            Path arrow = new Path();
+            arrow.moveTo(cx, cy);
+            arrow.lineTo(cx, cy + s);
+            arrow.lineTo(cx + s * 0.28f, cy + s * 0.76f);
+            arrow.lineTo(cx + s * 0.40f, cy + s * 1.02f);
+            arrow.lineTo(cx + s * 0.54f, cy + s * 0.96f);
+            arrow.lineTo(cx + s * 0.42f, cy + s * 0.70f);
+            arrow.lineTo(cx + s * 0.68f, cy + s * 0.70f);
+            arrow.close();
+            cursorPaint.setStyle(Paint.Style.FILL);
+            cursorPaint.setColor(Color.WHITE);
+            canvas.drawPath(arrow, cursorPaint);
+            cursorPaint.setStyle(Paint.Style.STROKE);
+            cursorPaint.setColor(Color.BLACK);
+            cursorPaint.setStrokeWidth(2f);
+            canvas.drawPath(arrow, cursorPaint);
+            cursorPaint.setColor(Color.WHITE);
         }
     }
 
