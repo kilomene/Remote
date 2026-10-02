@@ -44,21 +44,6 @@
         </LinearLayout>
     </HorizontalScrollView>
 
-    <!-- adaptive-quality badge -->
-    <TextView
-        android:id="@+id/adaptive_badge"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:layout_gravity="top|center_horizontal"
-        android:layout_marginTop="72dp"
-        android:background="@drawable/bg_toolbar"
-        android:paddingStart="12dp"
-        android:paddingEnd="12dp"
-        android:paddingTop="6dp"
-        android:paddingBottom="6dp"
-        android:textColor="@color/warning"
-        android:textSize="12sp"
-        android:visibility="gone" />
 
     <!-- recording indicator -->
     <LinearLayout
@@ -116,32 +101,6 @@
             android:textColor="@color/text"
             android:textSize="12sp"
             android:fontFamily="sans-serif-medium" />
-    </LinearLayout>
-
-    <!-- mouse-mode L/R buttons: large, prominent, thumb-reachable -->
-    <LinearLayout
-        android:id="@+id/mouse_bar"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:layout_gravity="bottom|center_horizontal"
-        android:layout_marginBottom="96dp"
-        android:orientation="horizontal"
-        android:visibility="gone">
-
-        <Button
-            android:id="@+id/mouse_left"
-            android:layout_width="96dp"
-            android:layout_height="72dp"
-            android:text="@string/mouse_left"
-            android:textSize="18sp" />
-
-        <Button
-            android:id="@+id/mouse_right"
-            android:layout_width="96dp"
-            android:layout_height="72dp"
-            android:layout_marginStart="16dp"
-            android:text="@string/mouse_right"
-            android:textSize="18sp" />
     </LinearLayout>
 
     <!-- keyboard toolbar (built in code) -->
