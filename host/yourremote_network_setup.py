@@ -4,9 +4,10 @@
 Real, step-by-step setup -- nothing is faked:
 
   1. check_tailscale_installed()  -- is `tailscale` on PATH?
-  2. install_tailscale()          -- adds Tailscale's official apt repo and
-                                     installs the package (needs root; the
-                                     user is asked to confirm first)
+  2. install_tailscale()          -- official apt repo when Tailscale
+                                     publishes one for this distro, else the
+                                     official static binaries (needs root;
+                                     the user is asked to confirm first)
   3. tailscale_up()               -- runs `tailscale up`, prints the login
                                      auth URL for the user to open
   4. verify_tailscale()           -- `tailscale status` must succeed and
@@ -22,10 +23,13 @@ Installed as /usr/bin/yourremote-network-setup.
 """
 import argparse
 import os
+import platform
 import re
 import shutil
 import subprocess
 import sys
+import tarfile
+import tempfile
 
 AUTH_URL_RE = re.compile(r"https://login\.tailscale\.com/[^\s'\"]+")
 
@@ -95,10 +99,32 @@ def distro_repo_flavor(os_release="/etc/os-release"):
 
 
 def install_tailscale(codename=None):
+    """Install tailscale, preferring the official apt repo.
+
+    Tries the apt repository first (it gets automatic updates); if Tailscale
+    publishes no repo for this distro (seen live: Debian 13 'trixie' 404s
+    under both trees), falls back to the official static binaries.
+    Raises WizardError only if both paths fail.
+    """
+    try:
+        return install_tailscale_repo(codename=codename)
+    except WizardError as e:
+        print("  repo install unavailable: %s" % str(e).splitlines()[0])
+        print("  falling back to Tailscale static binaries...")
+    return install_tailscale_static()
+
+
+def tailscale_keyring_url(flavor, codename):
+    return ("https://pkgs.tailscale.com/stable/%s/%s.noarch.gpg"
+            % (flavor, codename))
+
+
+def install_tailscale_repo(codename=None):
     """Install tailscale via the official apt repository. Needs root.
 
     Returns True on success; raises WizardError with the failing step's
     output otherwise. Every apt/curl invocation's return code is checked.
+    A broken sources list written by a failed attempt is removed again.
     """
     need_root()
     flavor = distro_repo_flavor()
@@ -108,6 +134,14 @@ def install_tailscale(codename=None):
             raise WizardError("cannot determine distro codename "
                               "(lsb_release failed)")
         codename = out.strip()
+    key_url = tailscale_keyring_url(flavor, codename)
+    # Cheap pre-check: if Tailscale publishes no repo for this distro
+    # (HTTP 404), fail fast before writing any apt state.
+    rc, _, _ = run(["curl", "-fsSIL", "-o", "/dev/null", key_url], timeout=30)
+    if rc != 0:
+        raise WizardError(
+            "Tailscale publishes no apt repo for %s/%s (tried %s)"
+            % (flavor, codename, key_url))
     steps = [
         (["apt-get", "update"],
          "apt-get update (prereqs)"),
@@ -117,33 +151,176 @@ def install_tailscale(codename=None):
     # NOTE: curl -o with argv list; the keyring URL is fixed upstream per
     # distro family (debian vs ubuntu trees).
     keyring = "/usr/share/keyrings/tailscale-archive-keyring.gpg"
-    steps.append(
-        (["curl", "-fsSL",
-          "https://pkgs.tailscale.com/stable/%s/%s.noarch.gpg" % (flavor, codename),
-          "-o", keyring],
-         "download Tailscale signing key"))
+    steps.append((["curl", "-fsSL", key_url, "-o", keyring],
+                  "download Tailscale signing key"))
     repo_line = ("deb [signed-by=%s] https://pkgs.tailscale.com/stable/%s "
                  "%s main\n" % (keyring, flavor, codename))
     steps.append((["apt-get", "update"], "apt-get update (tailscale repo)"))
     steps.append((["apt-get", "install", "-y", "tailscale"],
                   "install tailscale package"))
 
-    for argv, label in steps:
-        if argv[0] == "apt-get" and "update" in argv and label.endswith("(tailscale repo)"):
-            # write the sources list just before this update
+    sources_list = "/etc/apt/sources.list.d/tailscale.list"
+    wrote_sources = False
+    try:
+        for argv, label in steps:
+            if argv[0] == "apt-get" and "update" in argv and label.endswith("(tailscale repo)"):
+                # write the sources list just before this update
+                try:
+                    with open(sources_list, "w") as f:
+                        f.write(repo_line)
+                    wrote_sources = True
+                except OSError as e:
+                    raise WizardError("cannot write apt sources list: %s" % e)
+            print("  $ %s" % " ".join(argv))
+            rc, out, err = run(argv, timeout=600)
+            if rc != 0:
+                raise WizardError("FAILED [%s] (exit %d):\n%s"
+                                  % (label, rc, (err or out).strip()[-2000:]))
+            print("  ok: %s" % label)
+    except WizardError:
+        if wrote_sources:
             try:
-                with open("/etc/apt/sources.list.d/tailscale.list", "w") as f:
-                    f.write(repo_line)
-            except OSError as e:
-                raise WizardError("cannot write apt sources list: %s" % e)
-        print("  $ %s" % " ".join(argv))
-        rc, out, err = run(argv, timeout=600)
-        if rc != 0:
-            raise WizardError("FAILED [%s] (exit %d):\n%s"
-                              % (label, rc, (err or out).strip()[-2000:]))
-        print("  ok: %s" % label)
+                os.unlink(sources_list)
+            except OSError:
+                pass
+        raise
     if not check_tailscale_installed():
         raise WizardError("apt reported success but `tailscale` is still "
+                          "not on PATH")
+    return True
+
+
+# --------------------------------------------------------------------------
+# Static-binary fallback (no apt repo for this distro)
+# --------------------------------------------------------------------------
+STATIC_ARCHES = {"x86_64": "amd64", "aarch64": "arm64", "armv7l": "arm",
+                 "armv6l": "arm"}
+
+
+def static_arch(machine=None):
+    """Map platform.machine() to Tailscale's static-build arch, or None."""
+    return STATIC_ARCHES.get((machine or platform.machine()).lower())
+
+
+def static_tarball_pick(html, arch):
+    """Pick the newest tailscale_<ver>_<arch>.tgz from a /stable/ listing."""
+    found = {}
+    for m in re.finditer(r"tailscale_([0-9][0-9.\-]*?)_%s\.tgz" % re.escape(arch),
+                         html or ""):
+        ver = m.group(1)
+        key = tuple(int(p) if p.isdigit() else 0
+                    for p in re.split(r"[.\-]", ver))
+        found[key] = m.group(0)
+    if not found:
+        return None
+    return found[max(found)]
+
+
+def tailscaled_unit():
+    """systemd unit for a static tailscaled install (mirrors upstream's)."""
+    return """[Unit]
+Description=Tailscale node agent
+Documentation=https://tailscale.com/kb/
+Wants=network-pre.target
+After=network-pre.target NetworkManager.service systemd-resolved.service
+
+[Service]
+ExecStart=/usr/local/bin/tailscaled --state=/var/lib/tailscale/tailscaled.state --socket=/run/tailscale/tailscaled.sock --port=41641
+ExecStopPost=/usr/local/bin/tailscaled --cleanup
+Restart=on-failure
+RuntimeDirectory=tailscale
+RuntimeDirectoryMode=0755
+StateDirectory=tailscale
+StateDirectoryMode=0700
+CacheDirectory=tailscale
+CacheDirectoryMode=0750
+Type=notify
+NotifyAccess=all
+
+[Install]
+WantedBy=multi-user.target
+"""
+
+
+def install_tailscale_static():
+    """Install Tailscale from the official static binaries. Needs root.
+
+    Used when the apt repo doesn't cover this distro. Downloads the newest
+    tailscale_<ver>_<arch>.tgz from pkgs.tailscale.com, installs
+    tailscale/tailscaled to /usr/local/bin, and enables a systemd unit.
+    """
+    need_root()
+    arch = static_arch()
+    if not arch:
+        raise WizardError(
+            "unsupported CPU for static Tailscale binaries: %s "
+            "(need one of: %s)" % (platform.machine(),
+                                   ", ".join(sorted(STATIC_ARCHES))))
+    rc, html, err = run(["curl", "-fsSL", "https://pkgs.tailscale.com/stable/"],
+                        timeout=60)
+    if rc != 0:
+        raise WizardError("could not list Tailscale builds: %s"
+                          % (err or html or "curl failed"))
+    tgz = static_tarball_pick(html, arch)
+    if not tgz:
+        raise WizardError("no static Tailscale build for %s at "
+                          "https://pkgs.tailscale.com/stable/" % arch)
+    url = "https://pkgs.tailscale.com/stable/" + tgz
+    print("  static build: %s" % tgz)
+    tmpd = tempfile.mkdtemp(prefix="tailscale-static-")
+    try:
+        print("  $ curl -fsSL %s -o ..." % url)
+        rc, _, err = run(["curl", "-fsSL", url, "-o",
+                          os.path.join(tmpd, tgz)], timeout=600)
+        if rc != 0:
+            raise WizardError("static download failed: %s" % (err or url))
+        try:
+            with tarfile.open(os.path.join(tmpd, tgz), "r:gz") as tf:
+                tf.extractall(tmpd, filter="data")
+        except (tarfile.TarError, OSError) as e:
+            raise WizardError("static archive corrupt: %s" % e)
+        top = [d for d in os.listdir(tmpd)
+               if d.startswith("tailscale_") and
+               os.path.isdir(os.path.join(tmpd, d))]
+        if not top:
+            raise WizardError("unexpected static archive layout")
+        src = os.path.join(tmpd, top[0])
+        for name in ("tailscale", "tailscaled"):
+            srcbin = os.path.join(src, name)
+            if not os.path.isfile(srcbin):
+                raise WizardError("static archive missing %s" % name)
+            shutil.copy2(srcbin, "/usr/local/bin/" + name)
+            os.chmod("/usr/local/bin/" + name, 0o755)
+        print("  ok: installed tailscale/tailscaled to /usr/local/bin")
+        unit_path = "/etc/systemd/system/tailscaled.service"
+        try:
+            with open(unit_path, "w") as f:
+                f.write(tailscaled_unit())
+        except OSError as e:
+            raise WizardError("cannot write systemd unit: %s" % e)
+        for argv in (["systemctl", "daemon-reload"],
+                     ["systemctl", "enable", "--now", "tailscaled"]):
+            print("  $ %s" % " ".join(argv))
+            rc, out, err = run(argv, timeout=120)
+            if rc != 0:
+                raise WizardError("FAILED [%s] (exit %d):\n%s"
+                                  % (" ".join(argv), rc,
+                                     (err or out).strip()[-2000:]))
+            print("  ok: %s" % " ".join(argv[1:]))
+    finally:
+        shutil.rmtree(tmpd, ignore_errors=True)
+    # A broken repo list from a failed/manual repo attempt would poison
+    # future apt runs; a static install makes it redundant anyway.
+    repo_list = "/etc/apt/sources.list.d/tailscale.list"
+    try:
+        with open(repo_list) as f:
+            if "pkgs.tailscale.com" in f.read():
+                os.unlink(repo_list)
+                print("  ok: removed redundant tailscale apt source")
+    except OSError:
+        pass
+    if not check_tailscale_installed():
+        raise WizardError("static install finished but `tailscale` is still "
                           "not on PATH")
     return True
 
