@@ -1,0 +1,12 @@
+#!/bin/sh
+# prerm for the remote package.
+set -e
+
+if [ -d /run/systemd/system ]; then
+    systemctl stop remote-host 2>/dev/null || true
+    systemctl disable remote-host 2>/dev/null || true
+fi
+
+#DEBHELPER#
+
+exit 0
