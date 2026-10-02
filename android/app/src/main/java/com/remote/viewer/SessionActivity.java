@@ -1329,6 +1329,37 @@ public class SessionActivity extends Activity
     }
 
     @Override
+    public void onPairingRequired() {
+        ui.post(() -> {
+            final EditText input = new EditText(SessionActivity.this);
+            input.setInputType(InputType.TYPE_CLASS_NUMBER);
+            input.setHint(R.string.pair_code_hint);
+            new AlertDialog.Builder(SessionActivity.this)
+                    .setTitle(R.string.pair_required_title)
+                    .setMessage(R.string.pair_required_msg)
+                    .setView(input)
+                    .setPositiveButton(R.string.pair_button, (d, w) -> {
+                        String code = input.getText().toString().trim();
+                        if (client != null) {
+                            client.stop();
+                            client = null;
+                        }
+                        connected = false;
+                        showStatus(getString(R.string.reconnecting), false);
+                        client = new RemoteClient(
+                                SessionActivity.this, host, port, password,
+                                SessionActivity.this);
+                        client.setPairCode(code);
+                        client.start();
+                    })
+                    .setNegativeButton(R.string.cancel,
+                            (d, w) -> finish())
+                    .setCancelable(false)
+                    .show();
+        });
+    }
+
+    @Override
     public void onDisconnected(final boolean willRetry, final String reason) {
         // Privacy: the camera NEVER survives a disconnect and never
         // auto-resumes. The user must explicitly tap Start Camera again.
