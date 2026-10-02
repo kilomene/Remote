@@ -36,6 +36,16 @@ def set_password(password: str, path: str) -> None:
         json.dump(cfg, f)
     os.chmod(tmp, 0o600)
     os.replace(tmp, path)
+    # The host service runs as the unprivileged `yourremote` user. When root
+    # creates the real config, hand it to the service user — a root-owned
+    # 0600 file would be unreadable to the daemon and it would never start.
+    if path == DEFAULT_CONFIG and os.geteuid() == 0:
+        try:
+            import pwd
+            pw = pwd.getpwnam("yourremote")
+            os.chown(path, pw.pw_uid, pw.pw_gid)
+        except KeyError:
+            pass  # no service user on this machine (dev/test)
     print("password set in %s" % path)
 
 
