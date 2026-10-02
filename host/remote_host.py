@@ -104,7 +104,10 @@ def load_config(path):
             cfg = json.load(f)
         salt = base64.b64decode(cfg["salt"])
         key = base64.b64decode(cfg["key"])
-        file_root = cfg.get("file_root") or os.path.expanduser("~")
+        # The service runs as the unprivileged `yourremote` user, which has
+        # no home directory: never default to ~ (unwritable). File sharing
+        # lives under /var/lib/remote (created by the package postinst).
+        file_root = cfg.get("file_root") or "/var/lib/remote/files"
         monitored = cfg.get("monitored_services") or ["remote-host", "tailscaled"]
         fps = cfg.get("fps") or 30
         if fps not in (15, 30, 45, 60):
