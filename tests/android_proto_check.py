@@ -22,10 +22,14 @@ AUTH_REQ, AUTH_RESP, AUTH_OK, AUTH_FAIL = 0x01, 0x02, 0x03, 0x04
 FRAME, INPUT, PING, PONG, DISCONNECT = 0x10, 0x11, 0x20, 0x21, 0xFF
 DEVICE_HELLO = 0x30
 CLIPBOARD_SET = 0x40
+SESSION_TOKEN, SESSION_ROTATE = 0x85, 0x86  # v4: s->c background traffic
 FILE_LIST, FILE_GET, FILE_DATA = 0x50, 0x51, 0x52
 FILE_DONE, FILE_PUT = 0x53, 0x54
 FILE_MKDIR, FILE_DELETE, FILE_RENAME = 0x55, 0x56, 0x57
 FILE_LIST_RESP, FILE_META, FILE_ERROR = 0x58, 0x59, 0x5A
+
+# background traffic the harness must tolerate while waiting
+BACKGROUND_SKIP = (FRAME, PONG, SESSION_TOKEN, SESSION_ROTATE)
 
 
 def send(sock, mtype, payload=b""):
@@ -52,14 +56,15 @@ def recv(sock):
 
 
 def recv_skip(sock, want, timeout=15):
-    """Read messages until one of `want` arrives; skip FRAME/PONG."""
+    """Read messages until one of `want` arrives; skip background traffic
+    (FRAME/PONG plus the v4 SESSION_TOKEN/SESSION_ROTATE)."""
     sock.settimeout(timeout)
     while True:
         mtype, payload = recv(sock)
         if mtype in want:
             sock.settimeout(None)
             return mtype, payload
-        if mtype not in (FRAME, PONG):
+        if mtype not in BACKGROUND_SKIP:
             raise RuntimeError("unexpected msg 0x%02x while waiting %s" %
                                (mtype, ["0x%02x" % w for w in want]))
 
