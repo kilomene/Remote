@@ -67,6 +67,8 @@
     <string name="mode_touch">Touch</string>
     <string name="mode_trackpad">Trackpad</string>
     <string name="mode_mouse">Mouse</string>
+    <string name="mouse_left">LEFT</string>
+    <string name="mouse_right">RIGHT</string>
     <string name="precision">Precision</string>
     <string name="q_ultra">Ultra</string>
     <string name="q_high">High</string>
