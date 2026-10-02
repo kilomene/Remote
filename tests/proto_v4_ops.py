@@ -235,6 +235,49 @@ def t_network_wizard_distro_flavor():
     assert netsetup.distro_repo_flavor("/nonexistent/os-release") == "ubuntu"
 
 
+def t_network_wizard_static_fallback():
+    # arch mapping
+    assert netsetup.static_arch("x86_64") == "amd64"
+    assert netsetup.static_arch("aarch64") == "arm64"
+    assert netsetup.static_arch("armv7l") == "arm"
+    assert netsetup.static_arch("riscv64") is None
+    # tarball picking: newest version wins
+    html = ('<a href="tailscale_1.98.2_amd64.tgz">x</a>'
+            '<a href="tailscale_1.102.4_amd64.tgz">x</a>'
+            '<a href="tailscale_1.102.4_arm64.tgz">x</a>'
+            '<a href="tailscale_1.9.0_amd64.tgz">x</a>')
+    assert netsetup.static_tarball_pick(html, "amd64") == \
+        "tailscale_1.102.4_amd64.tgz"
+    assert netsetup.static_tarball_pick(html, "arm64") == \
+        "tailscale_1.102.4_arm64.tgz"
+    assert netsetup.static_tarball_pick(html, "riscv64") is None
+    assert netsetup.static_tarball_pick("", "amd64") is None
+    # systemd unit sanity (mirrors upstream's key directives)
+    unit = netsetup.tailscaled_unit()
+    for needle in ("ExecStart=/usr/local/bin/tailscaled",
+                   "--state=/var/lib/tailscale/tailscaled.state",
+                   "WantedBy=multi-user.target", "Restart=on-failure"):
+        assert needle in unit, "unit missing: %s" % needle
+    # install_tailscale() falls back to static when the repo is unavailable
+    calls = []
+    orig_repo = netsetup.install_tailscale_repo
+    orig_static = netsetup.install_tailscale_static
+    try:
+        def fake_repo(codename=None):
+            calls.append("repo")
+            raise netsetup.WizardError("no repo for debian/trixie")
+        def fake_static():
+            calls.append("static")
+            return True
+        netsetup.install_tailscale_repo = fake_repo
+        netsetup.install_tailscale_static = fake_static
+        assert netsetup.install_tailscale() is True
+    finally:
+        netsetup.install_tailscale_repo = orig_repo
+        netsetup.install_tailscale_static = orig_static
+    assert calls == ["repo", "static"], calls
+
+
 # ---------------------------------------------------------------- deb build
 def t_deb_build_contents():
     build = os.path.join(ROOT, "packaging", "deb", "build-deb.sh")
@@ -287,6 +330,7 @@ def main():
     check("settings input validation", t_settings_validation)
     check("network wizard --help + steps", t_network_wizard_help_and_steps)
     check("network wizard distro flavor", t_network_wizard_distro_flavor)
+    check("network wizard static fallback", t_network_wizard_static_fallback)
     check("deb build contents", t_deb_build_contents)
     if FAILURES:
         print("\n%d FAILURES" % len(FAILURES))
