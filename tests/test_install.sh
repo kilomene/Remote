@@ -270,6 +270,26 @@ grep -qF "$SECRET_PW" "$STUB_LOG" && fail "password leaked into sudo argv"
 rm -f "$STUB_BIN/id" "$STUB_BIN/sudo"
 pass "sudo re-exec"
 
+echo "=== [13] stdout carries data only — progress chatter on stderr (regression) ==="
+# A real agent hit this: resolve_deb()'s log/run chatter went to stdout, so
+# deb="$(resolve_deb)" captured "== downloading...\n+ curl...\n/tmp/...deb"
+# and apt-get received the blob instead of the path. Progress must be stderr.
+: > "$STUB_LOG"; rm -f "$TMP/stub_remote_version"
+OUT_STDOUT="$TMP/out13.txt"; OUT_STDERR="$TMP/err13.txt"
+bash install.sh --yes --version 1.2.0 --dry-run --no-systemd \
+    >"$OUT_STDOUT" 2>"$OUT_STDERR" \
+    || fail "dry-run run failed"
+# Note: the summary banner "================" is human output, not chatter —
+# the regex requires the trailing-space form that log()/run() emit.
+if grep -qE '^== |^\+ |^\[dry-run\]' "$OUT_STDOUT"; then
+    fail "progress chatter leaked onto stdout (this broke apt-get's deb path)"
+fi
+grep -q "downloading" "$OUT_STDERR" \
+    || fail "progress output missing from stderr (humans still need it)"
+grep -q "Remote host ready" "$OUT_STDOUT" \
+    || fail "summary missing from stdout"
+pass "stdout clean; chatter on stderr"
+
 echo
 echo "==============================="
 echo "ALL INSTALL TESTS PASSED"
