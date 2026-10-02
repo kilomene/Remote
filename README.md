@@ -139,6 +139,72 @@ host sends `READY=1` once its socket is bound and `WATCHDOG=1` every 30 s.
    upload, progress + resume). Clipboard syncs both ways automatically
    (toggle in Settings).
 
+## Camera for Verification (Android → Linux virtual camera)
+
+The Android phone is the physical camera. The Linux machine exposes the
+received stream as a virtual camera for authorized verification
+applications. Verification use only — this is not a surveillance or
+general webcam feature.
+
+How it works:
+
+1. In a session, tap the video-camera toolbar button and choose
+   **Start Camera** (front or rear). Android asks for the normal
+   `CAMERA` runtime permission first.
+2. The phone captures with Camera2, encodes H.264 in hardware
+   (MediaCodec, 1280×720 @ up to 30 fps, SPS/PPS-prefixed IDRs), and
+   streams access units over the existing authenticated, encrypted
+   session (`CAMERA_START` / `CAMERA_FRAME` / `CAMERA_STOP`, protocol v4).
+3. The Linux host decodes with ffmpeg and presents the stream as a real
+   V4L2 device — `/dev/videoN`, dynamically selected (never blindly
+   `/dev/video0`) — via v4l2loopback. Any authorized Linux application
+   can open it like a normal webcam.
+4. A persistent **● CAMERA ACTIVE** indicator stays on screen while
+   streaming. Tap **Stop Camera** (or the indicator) to stop.
+
+Privacy and safety behavior:
+
+- The camera starts ONLY on your explicit tap. It never auto-starts on
+  connect, never runs in the background, and the Linux side cannot force
+  it on.
+- The camera stops immediately when you tap Stop, the session
+  disconnects, the host stops it, the activity is destroyed, or the
+  camera permission is revoked. It never resumes by itself.
+- No frames are saved to storage. No face recognition, no identity
+  tracking.
+- Host side is gated by the fail-closed `camera` permission flag, and
+  every camera session is JSON-logged.
+
+Linux requirements: `v4l2loopback-dkms` and `ffmpeg`
+(`Recommends:` of the `.deb`; the host prints the exact install command
+if the kernel module is missing).
+
+Verify the virtual camera:
+
+```bash
+# list video devices; the YourRemote one is ours
+v4l2-ctl --list-devices 2>/dev/null || ls -l /dev/video*
+# watch the phone feed (any V4L2 app works: vlc, cheese, OBS, ...)
+ffplay -f v4l2 -i /dev/videoN
+```
+
+Troubleshooting:
+
+- `CAMERA_STATUS` says `v4l2loopback not available` →
+  `sudo apt install v4l2loopback-dkms && sudo modprobe v4l2loopback`.
+- `ffmpeg not found` → `sudo apt install ffmpeg`.
+- Stream looks rotated → the phone reports its orientation in
+  `CAMERA_START`; the host rotates with `transpose`. If a device reports
+  a wrong sensor orientation, that phone model needs a quirk.
+- Stutter on slow networks is by design: the phone drops frames rather
+  than growing delay (bounded queue, drop-oldest).
+
+Physical-hardware test (the one check no CI can do): install the
+generated `.deb` on Ubuntu, start the host, pair the phone, tap Start
+Camera, grant the permission, and confirm a Linux app (e.g. `ffplay
+/dev/videoN`) shows the phone's live feed; then tap Stop and confirm
+`/dev/videoN` goes dark and no camera process remains.
+
 ## Security notes
 
 - Transport encryption: Tailscale/WireGuard. Remote never listens on the
@@ -188,12 +254,10 @@ bash tests/selftest.sh
 Releases: pushing a tag `v*` builds both artifacts in GitHub Actions and
 attaches `remote_*_all.deb` + `remote-viewer.apk` to the GitHub release.
 
-## What v1.0.0 does NOT do yet
+## What v1.1.0 does NOT do yet
 
 - Android audio playback UI (host-side capture is real; the player ships
-  in the next Android release)
-- Android camera capture side (host-side `/dev/video0` sink is real;
-  the phone capture ships in the next Android release)
+  in a later Android release)
 - Voice RTX (protocol range 0x90–0x97 reserved)
 - iOS viewer
 
